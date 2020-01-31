@@ -1,0 +1,41 @@
+diff --git a/Python/sandbox.ipynb b/Python/sandbox.ipynb
+index 70575ce..ab3a55f 100644
+--- a/Python/sandbox.ipynb
++++ b/Python/sandbox.ipynb
+@@ -312,6 +312,18 @@
+     "print(sst_bert_model.predict(phrase_encoded_formatted))"
+    ]
+   },
++  {
++   "cell_type": "code",
++   "execution_count": null,
++   "outputs": [],
++   "source": [],
++   "metadata": {
++    "collapsed": false,
++    "pycharm": {
++     "name": "#%%\n"
++    }
++   }
++  },
+   {
+    "cell_type": "code",
+    "execution_count": null,
+@@ -341,13 +353,13 @@
+   "pycharm": {
+    "stem_cell": {
+     "cell_type": "raw",
++    "source": [],
+     "metadata": {
+      "collapsed": false
+-    },
+-    "source": []
++    }
+    }
+   }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 1
+-}
++}
+\ No newline at end of file

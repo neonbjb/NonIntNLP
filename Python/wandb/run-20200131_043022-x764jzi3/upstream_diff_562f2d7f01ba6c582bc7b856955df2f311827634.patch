@@ -1,0 +1,564 @@
+diff --git a/Python/sandbox.ipynb b/Python/sandbox.ipynb
+index b2deca7..ab3a55f 100644
+--- a/Python/sandbox.ipynb
++++ b/Python/sandbox.ipynb
+@@ -2,7 +2,7 @@
+  "cells": [
+   {
+    "cell_type": "code",
+-   "execution_count": null,
++   "execution_count": 1,
+    "metadata": {
+     "pycharm": {
+      "is_executing": false
+@@ -15,7 +15,9 @@
+     "import tensorflow_datasets\n",
+     "import numpy as np\n",
+     "import tensorflow.keras as keras\n",
++    "import tensorflow.keras.backend as K\n",
+     "from tensorflow.keras.layers import Dense, Input\n",
++    "from utils import downconvert_tf_dataset\n",
+     "\n",
+     "from transformers import (TFBertModel, \n",
+     "                          BertTokenizer,\n",
+@@ -24,7 +26,7 @@
+   },
+   {
+    "cell_type": "code",
+-   "execution_count": null,
++   "execution_count": 2,
+    "metadata": {
+     "pycharm": {
+      "is_executing": false,
+@@ -47,7 +49,7 @@
+   },
+   {
+    "cell_type": "code",
+-   "execution_count": null,
++   "execution_count": 3,
+    "metadata": {
+     "pycharm": {
+      "is_executing": false,
+@@ -57,254 +59,270 @@
+    "outputs": [],
+    "source": [
+     "# Fetch pre-trained models\n",
+-    "\n",
+     "bert_base_model = TFBertModel.from_pretrained(\"bert-base-cased\")\n",
+     "tokenizer = BertTokenizer.from_pretrained(\"bert-base-cased\")"
+    ]
+   },
+   {
+    "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {
+-    "pycharm": {
+-     "is_executing": false,
+-     "name": "#%%\n"
+-    },
+-    "scrolled": true
+-   },
++   "execution_count": 4,
++   "metadata": {},
+    "outputs": [],
+    "source": [
+-    "# Fetch and format dataset.\n",
+-    "def downconvert_tf_dataset(dataset, tok, pad_token=0):\n",
+-    "    inputs = []\n",
+-    "    atts = []\n",
+-    "    toks = []\n",
+-    "    outputs = []\n",
+-    "    for i,m in enumerate(dataset):\n",
+-    "        input = tok.encode_plus(m['sentence'].numpy().decode(\"utf-8\"),\\\n",
+-    "                                      add_special_tokens=True, max_length=MAX_SEQ_LEN,)\n",
+-    "        input_ids, token_type_ids = input[\"input_ids\"], input[\"token_type_ids\"]\n",
+-    "        attention_mask = [0] * len(input_ids)\n",
+-    "        \n",
+-    "        # Pad strings to exactly MAX_SEQ_LEN\n",
+-    "        padding_length = MAX_SEQ_LEN - len(input_ids)\n",
+-    "        input_ids = input_ids + ([pad_token] * padding_length)\n",
+-    "        attention_mask = attention_mask + ([0] * padding_length)\n",
+-    "        token_type_ids = token_type_ids + ([0] * padding_length)\n",
++    "def create_new_classification_head(dataset_name, base_model_cls_head, dense_config=[256,2]):\n",
++    "    # Fetch the data.\n",
++    "    data = tensorflow_datasets.load(dataset_name)\n",
++    "    train_x, train_y = downconvert_tf_dataset(data[\"train\"], tokenizer, MAX_SEQ_LEN)\n",
++    "    val_x, val_y = downconvert_tf_dataset(data[\"validation\"], tokenizer, MAX_SEQ_LEN)\n",
++    "    print(\"Dataset %s train_sz=%i val_sz=%i\" % \\\n",
++    "          (dataset_name, train_y.shape[0], val_y.shape[0]))\n",
++    "    \n",
++    "    # Create the head.\n",
++    "    tensor = base_model_cls_head\n",
++    "    for layer_units in dense_config[0:-1]:\n",
++    "        tensor = Dense(units=layer_units, activation=\"relu\", name=\"%s_%i\" % (dataset_name, layer_units))(tensor)\n",
++    "    tensor = Dense(units=dense_config[-1], activation=\"softmax\", name=\"final_%s\" % (dataset_name))(tensor)\n",
++    "    \n",
++    "    return train_x, train_y, val_x, val_y, tensor\n",
+     "\n",
+-    "        # Double-check results.\n",
+-    "        assert len(input_ids) == MAX_SEQ_LEN, \"Error with input length {} vs {}\".format(len(input_ids), max_length)\n",
+-    "        assert len(attention_mask) == MAX_SEQ_LEN, \"Error with input length {} vs {}\".format(\n",
+-    "            len(attention_mask), MAX_SEQ_LEN\n",
+-    "        )\n",
+-    "        assert len(token_type_ids) == MAX_SEQ_LEN, \"Error with input length {} vs {}\".format(\n",
+-    "            len(token_type_ids), MAX_SEQ_LEN\n",
+-    "        )\n",
+-    "        \n",
+-    "        # Form lists.\n",
+-    "        inputs.append(np.asarray(input_ids))\n",
+-    "        atts.append(np.asarray(attention_mask))\n",
+-    "        toks.append(np.asarray(token_type_ids))\n",
+-    "        outputs.append(m['label'].numpy())\n",
+-    "    return [np.asarray(inputs), np.asarray(atts), np.asarray(toks)], np.asarray(outputs)\n",
+-    "\n",
+-    "sst_data = tensorflow_datasets.load(\"glue/sst2\")\n",
+-    "sst_train_x, sst_train_y = downconvert_tf_dataset(sst_data[\"train\"], tokenizer)\n",
+-    "sst_val_x, sst_val_y = downconvert_tf_dataset(sst_data[\"validation\"], tokenizer)\n",
++    "def join_np_arrays_with_starting_none(l_a, l_b):\n",
++    "    # l_a can be None.\n",
++    "    if l_a is None:\n",
++    "        return l_b\n",
++    "    else:\n",
++    "        return np.concatenate((l_a, l_b), axis=0)\n",
+     "\n",
+-    "'''\n",
+-    "# We can work in-place with a TF dataset, but working with them is a pain and there are bugs:\n",
+-    "#  Doesn't complete some epochs with \"out of data\" error\n",
+-    "#  Doesn't track training properly\n",
+-    "#  Doesn't use validation set properly\n",
+-    "train_dataset = glue_convert_examples_to_features(data[\"train\"], tokenizer, MAX_SEQ_LEN, 'sst-2')\\\n",
+-    "    .shuffle(1337)\\\n",
+-    "    .batch(BATCH_SIZE)\\\n",
+-    "    .repeat(EPOCHS)\n",
+-    "validation_dataset = glue_convert_examples_to_features(data[\"validation\"], tokenizer, MAX_SEQ_LEN, 'sst-2')\\\n",
+-    "    .batch(BATCH_SIZE)\n",
+-    "    '''\n",
+-    "\n",
+-    "print(\"Done.\")"
++    "def create_joint_classification_heads(datasets, base_model_cls_head, cls_task_selector_input,\\\n",
++    "                                      dense_config=[256,2]):\n",
++    "    cls_heads = []\n",
++    "    train_x, train_y, val_x, val_y = None, None, None, None\n",
++    "    for (i, dataset) in enumerate(datasets):\n",
++    "        # tx and vx are lists of inputs which include the unique transformer inputs for the underlying\n",
++    "        #  model.\n",
++    "        tx, ty, vx, vy, h = create_new_classification_head(dataset, base_model_cls_head, dense_config)\n",
++    "        \n",
++    "        # need to append in a signal to tx and vx which indicates which classification task the data\n",
++    "        #  comes from. This will be a one-hot array which the multi-head output will be multiplied against.\n",
++    "        cls_task_id = np.zeros(len(datasets))\n",
++    "        cls_task_id[i] = 1\n",
++    "        tx.append(np.broadcast_to(cls_task_id, (ty.shape[0], len(datasets))))\n",
++    "        vx.append(np.broadcast_to(cls_task_id, (vy.shape[0], len(datasets))))\n",
++    "        \n",
++    "        # next, append the datasets and new head into the final produced list.\n",
++    "        if train_x is None:\n",
++    "            train_x = [None for i in range(len(tx))]\n",
++    "            val_x = [None for i in range(len(tx))]\n",
++    "        for i, _ in enumerate(train_x):\n",
++    "            train_x[i] = join_np_arrays_with_starting_none(train_x[i], tx[i])\n",
++    "            val_x[i] = join_np_arrays_with_starting_none(val_x[i], vx[i])\n",
++    "        train_y = join_np_arrays_with_starting_none(train_y, ty)\n",
++    "        val_y = join_np_arrays_with_starting_none(val_y, vy)\n",
++    "        cls_heads.append(h)\n",
++    "    \n",
++    "    # shuffle the joined training datasets\n",
++    "    randomize = np.arange(len(train_y))\n",
++    "    np.random.shuffle(randomize)\n",
++    "    for i in range(len(train_x)):\n",
++    "        train_x[i] = train_x[i][randomize]\n",
++    "    train_y = train_y[randomize]\n",
++    "    \n",
++    "    # Reshape classification heads to all have a concatenation dimension\n",
++    "    cls_heads_shaped = []\n",
++    "    for head in cls_heads:\n",
++    "        # TODO: TEST changing \"2\" (hardcoded) to \"-1\"\n",
++    "        cls_heads_shaped.append(keras.layers.Reshape((1,2))(head))\n",
++    "    # join the classification heads into a single output.\n",
++    "    cls_heads_cat = None\n",
++    "    if len(cls_heads) > 1:\n",
++    "        cls_heads_cat = keras.layers.Concatenate(axis=1)(cls_heads_shaped)\n",
++    "    else:\n",
++    "        cls_heads_cat = cls_heads_shaped[0]\n",
++    "    print(\"cls_heads_cat:\",K.int_shape(cls_heads_cat))\n",
++    "    print(\"cls_selector:\",K.int_shape(cls_task_selector_input))\n",
++    "    cls_output = keras.layers.Dot(name=\"cls_head_join\", axes=(1,1))([cls_task_selector_input, cls_heads_cat])\n",
++    "    \n",
++    "    return train_x,train_y,val_x,val_y,cls_output\n",
++    "    "
+    ]
+   },
+   {
+    "cell_type": "code",
+-   "execution_count": null,
++   "execution_count": 5,
+    "metadata": {
+     "pycharm": {
+      "is_executing": false,
+      "name": "#%%\n"
+     },
+-    "scrolled": true
++    "scrolled": false
+    },
+-   "outputs": [],
++   "outputs": [
++    {
++     "name": "stderr",
++     "output_type": "stream",
++     "text": [
++      "INFO:absl:Overwrite dataset info from restored data version.\n",
++      "INFO:absl:Reusing dataset glue (C:\\Users\\jbetk\\tensorflow_datasets\\glue\\sst2\\0.0.2)\n",
++      "INFO:absl:Constructing tf.data.Dataset for split None, from C:\\Users\\jbetk\\tensorflow_datasets\\glue\\sst2\\0.0.2\n",
++      "INFO:absl:Overwrite dataset info from restored data version.\n",
++      "INFO:absl:Reusing dataset glue (C:\\Users\\jbetk\\tensorflow_datasets\\glue\\cola\\0.0.2)\n",
++      "INFO:absl:Constructing tf.data.Dataset for split None, from C:\\Users\\jbetk\\tensorflow_datasets\\glue\\cola\\0.0.2\n"
++     ]
++    },
++    {
++     "name": "stdout",
++     "output_type": "stream",
++     "text": [
++      "Dataset glue/sst2 train_sz=67349 val_sz=872\n",
++      "Dataset glue/cola train_sz=8551 val_sz=1043\n",
++      "cls_heads_cat: (None, 2, 2)\n",
++      "cls_selector: (None, 2)\n",
++      "Model: \"model\"\n",
++      "__________________________________________________________________________________________________\n",
++      "Layer (type)                    Output Shape         Param #     Connected to                     \n",
++      "==================================================================================================\n",
++      "input_ids (InputLayer)          [(None, 128)]        0                                            \n",
++      "__________________________________________________________________________________________________\n",
++      "attention_mask (InputLayer)     [(None, 128)]        0                                            \n",
++      "__________________________________________________________________________________________________\n",
++      "tf_bert_model (TFBertModel)     ((None, 128, 768), ( 108310272   input_ids[0][0]                  \n",
++      "                                                                 attention_mask[0][0]             \n",
++      "__________________________________________________________________________________________________\n",
++      "glue/sst2_256 (Dense)           (None, 256)          196864      tf_bert_model[0][1]              \n",
++      "__________________________________________________________________________________________________\n",
++      "glue/cola_256 (Dense)           (None, 256)          196864      tf_bert_model[0][1]              \n",
++      "__________________________________________________________________________________________________\n",
++      "final_glue/sst2 (Dense)         (None, 2)            514         glue/sst2_256[0][0]              \n",
++      "__________________________________________________________________________________________________\n",
++      "final_glue/cola (Dense)         (None, 2)            514         glue/cola_256[0][0]              \n",
++      "__________________________________________________________________________________________________\n",
++      "reshape (Reshape)               (None, 1, 2)         0           final_glue/sst2[0][0]            \n",
++      "__________________________________________________________________________________________________\n",
++      "reshape_1 (Reshape)             (None, 1, 2)         0           final_glue/cola[0][0]            \n",
++      "__________________________________________________________________________________________________\n",
++      "classification_task_selector (I [(None, 2)]          0                                            \n",
++      "__________________________________________________________________________________________________\n",
++      "concatenate (Concatenate)       (None, 2, 2)         0           reshape[0][0]                    \n",
++      "                                                                 reshape_1[0][0]                  \n",
++      "__________________________________________________________________________________________________\n",
++      "token_type_ids (InputLayer)     [(None, 128)]        0                                            \n",
++      "__________________________________________________________________________________________________\n",
++      "cls_head_join (Dot)             (None, 2)            0           classification_task_selector[0][0\n",
++      "                                                                 concatenate[0][0]                \n",
++      "==================================================================================================\n",
++      "Total params: 108,705,028\n",
++      "Trainable params: 108,705,028\n",
++      "Non-trainable params: 0\n",
++      "__________________________________________________________________________________________________\n",
++      "None\n"
++     ]
++    }
++   ],
+    "source": [
+     "# Configure and compile model.\n",
+     "\n",
++    "dataset_ids=[\"glue/sst2\", \"glue/cola\"]\n",
++    "\n",
+     "# Later cells might set trainable=False; which we don't necessarily want here.\n",
+-    "bert_base_model.trainable = True\n",
+-    "sst_inputs = [Input(shape=(128,), dtype='int32', name='input_ids'),\n",
++    "inputs = [Input(shape=(128,), dtype='int32', name='input_ids'),\n",
+     "          Input(shape=(128,), dtype='int32', name='attention_mask'), \n",
+-    "          Input(shape=(128,), dtype='int32', name='token_type_ids')]\n",
++    "          Input(shape=(128,), dtype='int32', name='token_type_ids'),\n",
++    "          Input(shape=(len(dataset_ids),), dtype='float32', name='classification_task_selector')]\n",
++    "\n",
+     "# Fetch the CLS head of the BERT model; index 1.\n",
+-    "sst_tensor = bert_base_model(sst_inputs)[1]\n",
+-    "#sst_tensor = Dense(activation='softmax', units=256)(sst_tensor)\n",
+-    "sst_tensor = Dense(activation='softmax', units=2)(sst_tensor)\n",
+-    "sst_bert_model = keras.Model(inputs=sst_inputs, outputs=sst_tensor)\n",
++    "cls_head = bert_base_model(inputs[0:2])[1]\n",
++    "\n",
++    "# Fetch and format dataset and classification head.\n",
++    "sst_train_x, sst_train_y, sst_val_x, sst_val_y, sst_tensor = \\\n",
++    "    create_joint_classification_heads(dataset_ids, cls_head, inputs[3], dense_config=[256,2])\n",
++    "\n",
++    "sst_bert_model = keras.Model(inputs=inputs, outputs=sst_tensor)\n",
+     "print(sst_bert_model.summary())\n",
+     "\n",
+     "# Configure optimizer, loss function and metrics.\n",
+-    "sst_optimizer_base_model = tf.keras.optimizers.Adam(learning_rate=3e-5, epsilon=1e-08)\n",
+-    "sst_optimizer_head = tf.keras.optimizers.Adam()\n",
++    "sst_optimizer = tf.keras.optimizers.Adam(learning_rate=3e-5, epsilon=1e-08)\n",
+     "if fp16:\n",
+-    "    tf.train.experimental.enable_mixed_precision_graph_rewrite(sst_optimizer_base_model)\n",
+-    "    tf.train.experimental.enable_mixed_precision_graph_rewrite(sst_optimizer_head)\n",
++    "    tf.train.experimental.enable_mixed_precision_graph_rewrite(sst_optimizer)\n",
+     "sst_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)\n",
+     "sst_metric = tf.keras.metrics.SparseCategoricalAccuracy('accuracy')\n",
+     "\n",
+-    "#sst_bert_model.compile(optimizer=[sst_optimizer_base_model, sst_optimizer_head], loss=sst_loss, metrics=[sst_metric])"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "## This cell defines a utility function for easily tracking progress in jupyter.\n",
+-    "\n",
+-    "import time, sys\n",
+-    "from IPython.display import clear_output\n",
+-    "\n",
+-    "def update_progress(epoch, progress, msg):\n",
+-    "    bar_length = 20\n",
+-    "    if isinstance(progress, int):\n",
+-    "        progress = float(progress)\n",
+-    "    if not isinstance(progress, float):\n",
+-    "        progress = 0\n",
+-    "    if progress < 0:\n",
+-    "        progress = 0\n",
+-    "    if progress >= 1:\n",
+-    "        progress = 1\n",
+-    "    block = int(round(bar_length * progress))\n",
+-    "    clear_output(wait = True)\n",
+-    "    text = \"Epoch {0}: [{1}] {2:.1f}% {3}\".format(epoch, \"#\" * block + \"-\" * (bar_length - block), \\\n",
+-    "                                                  progress * 100, msg)\n",
+-    "    print(text)"
++    "sst_bert_model.compile(optimizer=sst_optimizer, loss=sst_loss, metrics=[sst_metric])"
+    ]
+   },
+   {
+    "cell_type": "code",
+-   "execution_count": null,
++   "execution_count": 7,
+    "metadata": {
+     "pycharm": {
+      "is_executing": false,
+      "name": "#%%\n"
+     }
+    },
+-   "outputs": [],
++   "outputs": [
++    {
++     "name": "stdout",
++     "output_type": "stream",
++     "text": [
++      "Train on 75900 samples, validate on 1915 samples\n",
++      "Epoch 1/3\n",
++      "75900/75900 [==============================] - 567s 7ms/sample - loss: 0.4926 - accuracy: 0.8084 - val_loss: 0.5313 - val_accuracy: 0.7791\n",
++      "Epoch 2/3\n",
++      "75900/75900 [==============================] - 552s 7ms/sample - loss: 0.4234 - accuracy: 0.8872 - val_loss: 0.5291 - val_accuracy: 0.7796\n",
++      "Epoch 3/3\n",
++      "75900/75900 [==============================] - 552s 7ms/sample - loss: 0.4152 - accuracy: 0.8955 - val_loss: 0.5414 - val_accuracy: 0.7671\n"
++     ]
++    }
++   ],
+    "source": [
+-    "from statistics import mean \n",
+-    "\n",
+-    "def train_step(model, loss, optimizers, optimizer_vars, x_vals, y_vals):\n",
+-    "    with tf.GradientTape(persistent=True) as tape:\n",
+-    "        logits = model(x_vals, training=True)\n",
+-    "        loss_value = loss(y_vals, logits)\n",
+-    "    loss_scalar = loss_value.numpy().mean()\n",
+-    "    for (optimizer, vrz) in zip(optimizers, optimizer_vars):\n",
+-    "        grads = tape.gradient(loss_value, vrz)\n",
+-    "        optimizer.apply_gradients(zip(grads, vrz))\n",
+-    "    del tape\n",
+-    "    return loss_scalar\n",
+-    "\n",
+-    "def train(model, loss, optimizers, optimizer_vars, x_vals, y_vals, epochs, batch_sz):\n",
+-    "    # Garbage collect before starting training to attempt to free up GPU memory.\n",
+-    "    gc.collect()\n",
+-    "    loss_history = []\n",
+-    "    for epoch in range(epochs):\n",
+-    "        training_data_count = y_vals.shape[0]\n",
+-    "        for batch_num in range(int(training_data_count / batch_sz)):\n",
+-    "            ii = batch_num * batch_sz\n",
+-    "            li = ii + batch_sz\n",
+-    "            li = training_data_count-1 if (li >= training_data_count) else li\n",
+-    "            # ii=initial index, li=last index. now create batches. remember that x_vals is a list of inputs.\n",
+-    "            batch_x = [x_vals_ele[ii:li] for x_vals_ele in x_vals]\n",
+-    "            batch_y = y_vals[ii:li]\n",
+-    "            loss_history.append(train_step(model, loss, optimizers, optimizer_vars, batch_x, batch_y))\n",
+-    "            loss_mean = loss_history[-1] if (len(loss_history) < 10) else mean(loss_history[-10:-1])\n",
+-    "            update_progress(epoch, ii/training_data_count, \\\n",
+-    "                            \"Loss=%f\" % (loss_history[-1]))\n",
+-    "    return loss_history\n",
+-    "            \n",
+-    "def find_tf_variables_not_in_list(full_variable_list, diff_list):\n",
+-    "    # Since tensors can't be compared directly, extract their names and use those as keys instead.\n",
+-    "    fvl_names = [v.name for v in full_variable_list]\n",
+-    "    dl_names = [v.name for v in diff_list]\n",
+-    "    diff_names = [n for n in fvl_names if (n not in dl_names)]\n",
+-    "    return [v for v in full_variable_list if (v.name in diff_names)]\n",
+-    "\n",
+-    "head_variables = find_tf_variables_not_in_list(sst_bert_model.trainable_variables, bert_base_model.trainable_variables)\n",
+-    "sst_bert_history = train(sst_bert_model, sst_loss, [sst_optimizer_base_model, sst_optimizer_head],\\\n",
+-    "                        [bert_base_model.trainable_variables, head_variables], sst_train_x, sst_train_y,\\\n",
+-    "                        EPOCHS, 16)\n",
+     "# Train model.\n",
+-    "#sst_bert_history = sst_bert_model.fit(sst_train_x, sst_train_y, epochs=EPOCHS, \\\n",
+-    "#                                      validation_data=(sst_val_x, sst_val_y))\n"
++    "sst_bert_history = sst_bert_model.fit(sst_train_x, sst_train_y, batch_size=BATCH_SIZE, epochs=EPOCHS, \\\n",
++    "                                      validation_data=(sst_val_x, sst_val_y))\n"
+    ]
+   },
+   {
+    "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "print(len(sst_bert_history))"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": null,
++   "execution_count": 28,
+    "metadata": {},
+-   "outputs": [],
++   "outputs": [
++    {
++     "name": "stdout",
++     "output_type": "stream",
++     "text": [
++      "[[1.0000000e+00 7.8082085e-06]]\n"
++     ]
++    }
++   ],
+    "source": [
+-    "# Transition dataset to another task; freeze BERT model; re-train new head.\n",
++    "#phrase = \"I was disappointed to see the credits roll, the film really had me.\"\n",
++    "phrase = \"A human there was she walked it\"\n",
+     "\n",
+-    "data_cola = tensorflow_datasets.load(\"glue/cola\")\n",
+-    "#print(list(data_cola[\"validation\"].__iter__())[0:5])\n",
+-    "cola_train_x, cola_train_y = downconvert_tf_dataset(data_cola[\"train\"], tokenizer)\n",
+-    "cola_val_x, cola_val_y = downconvert_tf_dataset(data_cola[\"validation\"], tokenizer)\n",
++    "def pad_zero(inputs, seq_len):\n",
++    "    for k in inputs: \n",
++    "        output = np.zeros(seq_len+1, dtype='int32')\n",
++    "        output[:len(inputs[k])] = np.asarray(inputs[k])\n",
++    "        inputs[k] = output\n",
++    "    return inputs\n",
++    " \n",
++    "phrase_encoded = pad_zero(tokenizer.encode_plus(phrase, add_special_tokens=True, max_length=128), 128)\n",
+     "\n",
+-    "cola_optimizer = VariantRateAdam(name=\"Adam\")\n",
+-    "if fp16:\n",
+-    "    tf.train.experimental.enable_mixed_precision_graph_rewrite(cola_optimizer)\n",
+-    "cola_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)\n",
+-    "cola_metric = tf.keras.metrics.SparseCategoricalAccuracy('accuracy')\n",
+-    "\n",
+-    "# Lock down the bert model. The intent is that the previous model trained this one.\n",
+-    "bert_base_model.trainable = False\n",
+-    "cola_inputs = [Input(shape=(128,), dtype='int32', name='input_ids'),\n",
+-    "          Input(shape=(128,), dtype='int32', name='attention_mask'), \n",
+-    "          Input(shape=(128,), dtype='int32', name='token_type_ids')]\n",
+-    "# Fetch the CLS head of the BERT model; index 1.\n",
+-    "cola_tensor = bert_base_model(cola_inputs)[1]\n",
+-    "cola_tensor = Dense(activation='softmax', units=256)(cola_tensor)\n",
+-    "cola_tensor = Dense(activation='softmax', units=2)(cola_tensor)\n",
+-    "cola_bert_model = keras.Model(inputs=cola_inputs, outputs=cola_tensor)\n",
+-    "print(cola_bert_model.summary())\n",
+-    "\n",
+-    "cola_bert_model.compile(optimizer=cola_optimizer, loss=cola_loss, metrics=[cola_metric])"
++    "phrase_encoded_formatted = \\\n",
++    "    [np.resize(phrase_encoded['input_ids'], (1,-1)),\n",
++    "    np.resize(phrase_encoded['token_type_ids'], (1,-1)),\n",
++    "    np.resize(phrase_encoded['attention_mask'], (1,-1)),\n",
++    "    np.asarray([[1,0]], dtype='float32')]\n",
++    "print(sst_bert_model.predict(phrase_encoded_formatted))"
+    ]
+   },
+   {
+    "cell_type": "code",
+    "execution_count": null,
+-   "metadata": {},
+    "outputs": [],
+-   "source": [
+-    "cola_bert_history = cola_bert_model.fit(cola_train_x, cola_train_y, epochs=EPOCHS, \\\n",
+-    "                                      validation_data=(cola_val_x, cola_val_y))"
+-   ]
++   "source": [],
++   "metadata": {
++    "collapsed": false,
++    "pycharm": {
++     "name": "#%%\n"
++    }
++   }
+   },
+   {
+    "cell_type": "code",
+@@ -335,13 +353,13 @@
+   "pycharm": {
+    "stem_cell": {
+     "cell_type": "raw",
++    "source": [],
+     "metadata": {
+      "collapsed": false
+-    },
+-    "source": []
++    }
+    }
+   }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 1
+-}
++}
+\ No newline at end of file
+diff --git a/Python/utils.py b/Python/utils.py
+index 6c6293b..40723c0 100644
+--- a/Python/utils.py
++++ b/Python/utils.py
+@@ -1,6 +1,34 @@
+-from transformers import glue_convert_examples_to_features
++import numpy as np
+ 
++def downconvert_tf_dataset(dataset, tok, pad_token=0, max_seq_len=128):
++    inputs = []
++    atts = []
++    toks = []
++    outputs = []
++    for i,m in enumerate(dataset):
++        input = tok.encode_plus(m['sentence'].numpy().decode("utf-8"),\
++                                      add_special_tokens=True, max_length=max_seq_len,)
++        input_ids, token_type_ids = input["input_ids"], input["token_type_ids"]
++        attention_mask = [0] * len(input_ids)
++        
++        # Pad strings to exactly max_seq_len
++        padding_length = max_seq_len - len(input_ids)
++        input_ids = input_ids + ([pad_token] * padding_length)
++        attention_mask = attention_mask + ([0] * padding_length)
++        token_type_ids = token_type_ids + ([0] * padding_length)
+ 
+-def encode_and_shuffle_glue_dataset(dataset, tokenizer, dataset_name, max_seq_len=128, batch_size=32, shuffle_seed=1337):
+-    dataset = glue_convert_examples_to_features(dataset, tokenizer, max_seq_len, dataset_name)
+-    return dataset.shuffle(shuffle_seed).batch(batch_size).repeat
+\ No newline at end of file
++        # Double-check results.
++        assert len(input_ids) == max_seq_len, "Error with input length {} vs {}".format(len(input_ids), max_length)
++        assert len(attention_mask) == max_seq_len, "Error with input length {} vs {}".format(
++            len(attention_mask), max_seq_len
++        )
++        assert len(token_type_ids) == max_seq_len, "Error with input length {} vs {}".format(
++            len(token_type_ids), max_seq_len
++        )
++        
++        # Form lists.
++        inputs.append(np.asarray(input_ids))
++        atts.append(np.asarray(attention_mask))
++        toks.append(np.asarray(token_type_ids))
++        outputs.append(m['label'].numpy())
++    return [np.asarray(inputs), np.asarray(atts), np.asarray(toks)], np.asarray(outputs)
+\ No newline at end of file

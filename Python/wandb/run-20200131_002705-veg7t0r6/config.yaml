@@ -1,0 +1,20 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.8.22
+    is_jupyter_run: true
+    python_version: 3.6.8
+batch_sz:
+  desc: null
+  value: 32
+dataset:
+  desc: null
+  value: glue/sst2
+epsilon:
+  desc: null
+  value: 1.0e-08
+learning_rate:
+  desc: null
+  value: 3.0e-05

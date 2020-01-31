@@ -1,0 +1,28 @@
+{
+    "root": "C:/drive/Projects/ML/NonIntNLP",
+    "program": "<python with no main file>",
+    "git": {
+        "remote": "https://github.com/neonbjb/NonIntNLP.git",
+        "commit": "d4e77a80a934cdf2ef0a367d21af9afae4fb35ad"
+    },
+    "email": "jbetker@gmail.com",
+    "startedAt": "2020-01-31T03:17:55.739740",
+    "host": "TR4",
+    "username": "jbetk",
+    "executable": "c:\\drive\\projects\\ml-notebooks\\pycharm-venv\\scripts\\python.exe",
+    "os": "Windows-10-10.0.18362-SP0",
+    "python": "3.6.8",
+    "gpu": "GeForce RTX 2080 Ti",
+    "gpu_count": 1,
+    "cpu_count": 24,
+    "args": [
+        "-f",
+        "C:\\Users\\jbetk\\AppData\\Roaming\\jupyter\\runtime\\kernel-05c8ee2d-bdf1-4630-bf47-45badae19aa3.json"
+    ],
+    "state": "running",
+    "jobType": null,
+    "mode": "run",
+    "name": "sst2-48-0.000020",
+    "project": "nonint-transformers",
+    "heartbeatAt": "2020-01-31T03:58:03.478465"
+}
