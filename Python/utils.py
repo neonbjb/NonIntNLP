@@ -1,4 +1,34 @@
 import numpy as np
+from queue import Queue
+from threading import Thread
+
+# Yield successive {n}-sized chunks from {lst}.
+def chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+def _map_reduce_thread(map_fn, input, q):
+    q.put(map_fn(input))
+
+# Performs a multi-threaded map-reduce operation.
+# This is done by chunking {inputs} into at most {max_threads} separate lists, then
+# feeding each list into a separate {map_fn} which runs on its own thread.
+# Waits for each thread to return its results. Results are compiled into a list of results and
+# fed to the {reduce_fn}. The result of this call is returned.
+def perform_map_reduce(map_fn, reduce_fn, inputs, max_threads):
+    threads = []
+    thread_count = min(max_threads, len(inputs))
+    chunked_inputs = chunks(inputs, int(len(inputs) / thread_count))
+    q = Queue()
+    for c in chunked_inputs:
+        t = Thread(target=lambda fn, i, qu: qu.put(fn(i)), args=(map_fn, c, q))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+    return reduce_fn(list(q.queue))
+
 
 def downconvert_tf_dataset(dataset, tok, pad_token=0, max_seq_len=128):
     inputs = []
