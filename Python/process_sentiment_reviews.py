@@ -1,17 +1,12 @@
-#%%
-
-# This file processes Amazon reviews derived from the datasets available here:
-# http://jmcauley.ucsd.edu/data/amazon/
-
 import orjson
-from transformers import (BertTokenizer, DistilBertTokenizer)
+from transformers import (BertTokenizer, DistilBertTokenizer, GPT2Tokenizer)
 import random
 import glob, os
 import time
 from multiprocessing import Pool
 
-# %%
-
+# This function processes Amazon reviews derived from the datasets available here:
+# http://jmcauley.ucsd.edu/data/amazon/
 # This dataset consists of a list of new-line separated entries. Entries are maps with the following keys:
 #  reviewerID
 #  asin
@@ -22,11 +17,11 @@ from multiprocessing import Pool
 #  summary
 #  unixReviewTime
 #  reviewTime
-
+#
 # Converts the given entry with the above format into a new map with the following keys:
 #  sentence (string)
 #  label (integer)
-def process_entry(entry, min_helpful=0, max_words=0):
+def process_amazon_entry(entry, min_helpful=0, max_words=0):
     if not 'helpful' in entry:
         return None
     if entry['helpful'][0] < min_helpful:
@@ -38,12 +33,42 @@ def process_entry(entry, min_helpful=0, max_words=0):
             }
 
 
+# This function processes Amazon reviews derived from the reviews.json dataset available here:
+# https://www.yelp.com/dataset
+# This dataset consists of a list of new-line separated entries. Entries are maps with the following keys:
+#  review_id, user_id, business_id b64
+#  stars (float)
+#  useful, funny, cool (integers)
+#  text
+#  date
+#
+# Converts the given entry with the above format into a new map with the following keys:
+#  sentence (string)
+#  label (integer)
+def process_yelp_entry(entry, min_helpful=0, max_words=0):
+    if not 'business_id' in entry:
+        return None
+    if entry['useful'] < min_helpful:
+        return None
+    if entry['text'].count(' ') + 1 > max_words:
+        return None
+    return {'sentence': entry['text'],
+            'label': int(entry['stars']),
+            }
+
+
 def process_file(filepath):
     result = [[], [], [], [], []]
-    with open(filepath) as file:
+    with open(filepath, encoding="utf-8") as file:
         line = file.readline()
         while line:
-            pent = process_entry(orjson.loads(line), min_helpful=5, max_words=300)
+            entry = orjson.loads(line)
+            pent = None
+            # Do a simple inference on the type of the file being passed in based on the fields provided.
+            if 'business_id' in entry:
+                pent = process_yelp_entry(entry, min_helpful=2, max_words=300)
+            elif 'asin' in entry:
+                pent = process_amazon_entry(entry, min_helpful=2, max_words=300)
             if pent:
                 result[pent['label'] - 1].append(pent)
             line = file.readline()
@@ -73,7 +98,10 @@ def reduce_file_reads(list_of_results):
     rating_counts = [0] * 5
     for (i, rl) in enumerate(combined_results):
         rating_counts[i] = len(rl)
-    min_rating_count = min(rating_counts)
+
+    # take the minimum star rating, and inflate it by a factor of 1.5. Do this because mid stars tend to have a very low
+    # comparative frequency. below we will cause these mid-star ratings to be repeated at random.
+    min_rating_count = int(min(rating_counts) * 1.5)
 
     balanced_reviews = []
     for rl in combined_results:
@@ -82,10 +110,15 @@ def reduce_file_reads(list_of_results):
     # Shuffle the reviews. We don't care about ratings from here on out.
     random.shuffle(balanced_reviews)
 
+    print("Total reviews collected: ", len(balanced_reviews))
+
     return balanced_reviews
 
-
-tok = BertTokenizer.from_pretrained("bert-base-cased")
+is_gpt2 = False
+if is_gpt2:
+    tok = GPT2Tokenizer.from_pretrained("gpt2")
+else:
+    tok = BertTokenizer.from_pretrained("bert-base-cased")
 
 # This is a map function for processing reviews. It returns a list of tokenized
 # reviews and labels.
@@ -94,6 +127,9 @@ def map_tokenize_reviews(review):
     max_seq_len = 128
 
     sentence = review['sentence']
+    if is_gpt2:
+        # Add a space prefix to the sentence before tokenizing for GPT-2 (and byte-encoded) models.
+        sentence = " " + sentence
     input = tok.encode_plus(sentence, add_special_tokens=True, max_length=max_seq_len)
     input_ids, token_type_ids = input["input_ids"], input["token_type_ids"]
     attention_mask = [0] * len(input_ids)
@@ -131,9 +167,11 @@ def reduce_tokenized_reviews(reviews):
 
 if __name__ == '__main__':
     # Fetch the reviews.
-    folder = "C:/Users/jbetk/Documents/data/ml/sentiment_analysis/amazon_reviews/"
-    os.chdir(folder)
+    folder = "C:/Users/jbetk/Documents/data/ml/sentiment_analysis/"
+    os.chdir(folder + "amazon/")
+    #files = []
     files = glob.glob("*.json")
+    files.append(folder + "yelp/review.json")
 
     # Basic workflow:
     # MAP: [files] => process_file
