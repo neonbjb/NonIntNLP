@@ -117,6 +117,7 @@ def reduce_file_reads(list_of_results):
 is_gpt2 = False
 if is_gpt2:
     tok = GPT2Tokenizer.from_pretrained("gpt2")
+    tok.pad_token = "<|endoftext|>"
 else:
     tok = BertTokenizer.from_pretrained("bert-base-cased")
 
@@ -124,30 +125,15 @@ else:
 # reviews and labels.
 def map_tokenize_reviews(review):
     pad_token = 0
-    max_seq_len = 128
+    max_seq_len = 512
 
     sentence = review['sentence']
     if is_gpt2:
         # Add a space prefix to the sentence before tokenizing for GPT-2 (and byte-encoded) models.
         sentence = " " + sentence
-    input = tok.encode_plus(sentence, add_special_tokens=True, max_length=max_seq_len)
+    input = tok.encode_plus(sentence, add_special_tokens=True, max_length=max_seq_len, pad_to_max_length=True)
     input_ids, token_type_ids = input["input_ids"], input["token_type_ids"]
     attention_mask = [0] * len(input_ids)
-
-    # Pad strings to exactly max_seq_len
-    padding_length = max_seq_len - len(input_ids)
-    input_ids = input_ids + ([pad_token] * padding_length)
-    attention_mask = attention_mask + ([0] * padding_length)
-    token_type_ids = token_type_ids + ([0] * padding_length)
-
-    # Double-check results.
-    assert len(input_ids) == max_seq_len, "Error with input length {} vs {}".format(len(input_ids), max_seq_len)
-    assert len(attention_mask) == max_seq_len, "Error with input length {} vs {}".format(
-        len(attention_mask), max_seq_len
-    )
-    assert len(token_type_ids) == max_seq_len, "Error with input length {} vs {}".format(
-        len(token_type_ids), max_seq_len
-    )
 
     # Push resultants to a simple list and return it
     return [input_ids, attention_mask, token_type_ids, review['label']]
