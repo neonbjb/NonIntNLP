@@ -55,10 +55,11 @@ def map_tokenize_news(processed):
     text = tok.bos_token + processed['content'] + tok.eos_token
     text_enc = tok.encode_plus(text, add_special_tokens=True, max_length=None, pad_to_max_length=False,
                                return_token_type_ids=False, return_attention_mask=True)
-    # Pad to a multiple of MAX_SEQ_LEN
+    # Pad to a multiple of MAX_SEQ_LEN. Pad left for XLNet. (why Google...)
+    insertion_index = int(len(text_enc['input_ids']) / MAX_SEQ_LEN) * MAX_SEQ_LEN
     while len(text_enc['input_ids']) % MAX_SEQ_LEN is not 0:
-        text_enc['input_ids'].append(tok.pad_token_id)
-        text_enc['attention_mask'].append(0)
+        text_enc['input_ids'].insert(insertion_index, tok.pad_token_id)
+        text_enc['attention_mask'].insert(insertion_index, 0)
 
     # Push resultants to a simple list and return it
     return {'text': text_enc, 'title': title_enc}
@@ -71,9 +72,6 @@ def map_tokenize_news(processed):
 #                    <sentences that require 2 MAX_SEQ_LEN sequences>, ... ]
 
 def reduce_tokenized_news(all_news):
-    result = {'input_ids': [],
-              'attention_mask': []
-              }
     random.shuffle(all_news)
     list_of_multiples = []
     for processed in all_news:
@@ -90,8 +88,8 @@ if __name__ == '__main__':
     # Fetch the news.
     folder = "C:/Users/jbetk/Documents/data/ml/title_prediction/"
     os.chdir(folder + "all-the-news/")
-    #files = ['test.csv']
-    files = glob.glob("*.csv")
+    files = ['test.csv']
+    #files = glob.glob("*.csv")
 
     # Basic workflow:
     # process_files individually and compile into a list.
