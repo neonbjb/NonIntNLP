@@ -20,7 +20,11 @@ def process_csv_line(line):
 
     # Once the "content" line begins, any number of commas can appear before the newline which must not be parsed.
     rejoined_content = ",".join(splitted[CONTENT_INDEX:-1])
-    if len(rejoined_content) < 128:
+
+    # Don't accept content with too small of text content or title content. Often these are very bad examples.
+    if len(rejoined_content) < 1024:
+        return None
+    if len(splitted[TITLE_INDEX]) < 30:
         return None
 
     return {"title": splitted[TITLE_INDEX], "content": rejoined_content}

@@ -3,6 +3,7 @@ import torch
 import transformers
 import math
 from typing import Tuple
+import uuid
 
 # This class implements a Dataset which is capable of feeding a model which expects a stream of
 # text with a generative target. It also (optionally) performs random masking on the target
@@ -185,11 +186,12 @@ class ChunkedTextDataset(Dataset):
                     c_text_masked, c_lab_full = self.perform_mask(c_text_masked)
                 input_ids_masked.append(c_text_masked)
                 labels.append(c_lab_full)
+
             return {
                 "input_ids": input_ids,
+                "input_ids_masked": input_ids_masked,
                 "token_type_ids": token_type_ids,
                 "attention_masks": attention_mask,
-                "masked_input_ids": input_ids_masked,
                 "labels": labels,
             }
 
@@ -247,11 +249,13 @@ class ChunkedTextDataset(Dataset):
             return math.ceil(text.shape[0] / text_len_per_chunk)
 
     # The output of this Dataloader is a dict as follows:
+    # 'text':             The text to be given to the model.
+    # 'target':           The raw text that we are trying to predict.
     # 'input_ids':        A list of tokenized strings (chunks) with the target string append on the end after a <CLS> token.
     # 'token_type_ids':   A list of token_type_id encodings which can be fed into the model alongside input_ids.
     # 'attention_masks':  A list of attention_masks which can be fed into the model alongside input_ids.
     # For auto-regressive language modeling (e.g. pre-training):
-    # 'masked_input_ids'  Same as 'input_ids', except parts are masked randomly.
+    # 'input_ids_masked'  Same as 'input_ids', except parts are masked randomly.
     # 'labels':           A list of either (a) masked tokens or (b) -100 for auto-regressive LM loss calculation.
     def __getitem__(self, index):
         return self.process_element(
@@ -296,16 +300,124 @@ class ChunkedTextBatchSampler(Sampler):
             yield batch
 
     def __len__(self):
-        return len(self.chunked_text_set) / self.batch_sz
+        # This is possibly (likely) not accurate, but it shouldn't matter.
+        return int(len(self.chunked_text_set) / self.batch_sz)
+
+
+def test_against_real_file(test_file, tokenizer):
+    batchsz = 48
+    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer)
+    loader = dataset.get_dataloader(batch_sz=batchsz)
+
+    _b_n = 0
+    for batch in loader:
+        print("Processing batch %i/%i" % (_b_n, len(loader)))
+        _b_n += 1
+
+        # Check a bunch of things:
+        # - Are there masks? Are they in a range of expected proportions?
+        # - If we use labels to restore input_ids_masked, do we get input_ids?
+        # - Does padding only occur in the last chunk and does it occur on the left? (using attention mask)
+        # - Does the len(token_type_id.count(1)==len(target_toks))?
+        # - Does the sequence contain <bos>, <eos> and <sep>?
+        # These aren't conclusive tests, but they give a good sense for whether or not this algorithm is working as
+        # expected.
+        masks = 0
+        target_toks = 0
+        chk_sz = len(batch["labels"])
+        for c in range(chk_sz):
+            for b in range(batchsz):
+                iim = batch["input_ids_masked"][c][b].tolist()
+                masks += iim.count(tokenizer.mask_token_id)
+                text_tok_count = iim.index(tokenizer.sep_token_id)
+                target_toks += len(iim) - text_tok_count
+
+                labels = batch["labels"][c][b]
+                inputs = batch["input_ids"][c][b]
+                mask = batch["attention_masks"][c][b]
+                tti = batch["token_type_ids"][c][b]
+                sep_enc = False
+                for i in range(labels.shape[0]):
+                    if iim[i] == tokenizer.sep_token_id:
+                        sep_enc = True
+                        continue
+                    # Check token type ids.
+                    Check(tti[i]).equals((1 if sep_enc else 0))
+
+                    # Check that we can find the proper input tokens in either the labels or the masked input ids.
+                    if labels[i] == -100:
+                        Check(iim[i]).equals(inputs[i])
+                    else:
+                        Check(labels[i]).equals(inputs[i])
+
+                    # Check attention mask
+                    Check(mask[i]).equals(
+                        0 if inputs[i] == tokenizer.pad_token_id else 1
+                    )
+
+        # Keep in mind that only 80% of the "masked" tokens are actually replaced with <mask>.
+        Check(masks / target_toks).is_at_least(0.18)
+
+
+def test_against_test_set(tokenizer):
+    # Check the actual conversions.
+    def test_enc(str):
+        return torch.tensor(
+            tokenizer.encode(str, add_special_tokens=False), dtype=torch.long
+        )
+
+    test_set = [
+        {
+            "text": test_enc(
+                "President Donald Trump’s new European travel restrictions have a convenient side effect"
+            ),
+            "target": test_enc("trump is an asshat"),
+        },
+        {
+            "text": test_enc(
+                """
+                Trump is already under fire for visiting his properties in both countries as president, leading to U.S. taxpayer money being spent at his own firms. The president has been saddled with lawsuits and investigations throughout his term alleging that he’s violating the Constitution’s emoluments clause by accepting taxpayer money other than his salary.
+                The U.S. government proclamation initiating the ban targets 26 European countries that comprise a visa-free travel zone known as the Schengen Area.
+                The United Kingdom, which is home to Trump Turnberry and Trump International Golf Links, and Ireland, which is home to another Trump-branded hotel and golf course at Doonbeg, do not participate in the Schengen Area. Bulgaria, Croatia and Romania are also not part of the Schengen Area. All three of the resorts are struggling financially.
+                Ireland’s prime minister, Leo Varadkar, is scheduled to meet Trump at the White House on Thursday in one of the few events related to St. Patrick’s Day that has not been canceled due to coronavirus concerns.
+                The administration’s European travel proclamation notes that “the Schengen Area has exported 201 COVID-19 cases to 53 countries. Moreover, the free flow of people between the Schengen Area countries makes the task of managing the spread of the virus difficult.”
+                Trump’s European travel ban comes with several other loopholes.
+                Though they are subject to border checks on arrival, residents of the 26 Schengen Area countries are also free to live and work in the United Kingdom, meaning they could fly to the United States from a British airport as long as they hadn't spent time within the Schengen countries in the last 14 days.
+                EU leaders condemned Trump's move on Thursday, and disputed the president's criticism of Europe's handling of the crisis.
+                “The Coronavirus is a global crisis, not limited to any continent and it requires cooperation rather than unilateral action,” European Commission President Ursula von der Leyen and European Council President Charles Michel said in a joint statement.
+                """
+            ),
+            "target": test_enc("trump is still an asshat"),
+        },
+    ]
+    torch.save(test_set, "test.pt")
+    dataset = ChunkedTextDataset(data_file="test.pt", tokenizer=tokenizer)
+    loader = dataset.get_dataloader(batch_sz=1)
+    it = 0
+    for batch in loader:
+        chk_sz = len(batch["input_ids"])
+        compiled_text = ""
+        for c in range(chk_sz):
+            inputs = batch["input_ids"][c][0].tolist()
+            text_tok_count = inputs.index(tokenizer.sep_token_id)
+            text_tens = tokenizer.decode(inputs[:text_tok_count])
+            text_tens = text_tens.replace(tokenizer.pad_token, "")
+            text_tens = text_tens.replace(tokenizer.bos_token, "")
+            compiled_text += text_tens
+        Check(compiled_text.strip()).equals(
+            tokenizer.decode(test_set[it]["text"]).strip()
+        )
+        it += 1
 
 
 if __name__ == "__main__":
+    from fluentcheck import Check
+
+    tokenizer = transformers.XLNetTokenizer.from_pretrained("xlnet-base-cased")
+
     # Provided for testing.
     test_file = (
         "C:\\Users\\jbetk\\Documents\\data\\ml\\title_prediction\\outputs\\val.pt"
     )
-    tokenizer = transformers.XLNetTokenizer.from_pretrained("xlnet-base-cased")
-    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer)
-    loader = dataset.get_dataloader(batch_sz=64)
-    for batch in loader:
-        print(tokenizer.decode(batch["masked_input_ids"][0][0]))
+    # test_against_real_file(test_file, tokenizer)
+    test_against_test_set(tokenizer)
