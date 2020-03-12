@@ -1,8 +1,8 @@
-import orjson
 from transformers import XLNetTokenizer
 import glob, os
 from multiprocessing import Pool
 import random
+import torch
 
 # This function processes news articles gathered from this Kaggle dataset:
 # https://www.kaggle.com/snapcrack/all-the-news/data
@@ -39,62 +39,28 @@ def process_file(filepath):
             line = file.readline()
     return result
 
-## Tokenizer must be global because this file uses a map-reduce function without shared inter-process memory.
-MAX_SEQ_LEN = 128
-MAX_TITLE_LEN = 64
 tok = XLNetTokenizer.from_pretrained("xlnet-base-cased")
 
 # This is a map function for processing reviews. It returns a dict:
-#  { 'text' { 'input_ids', 'attention_mask', 'token_type_ids' },  # list of input text sequences, each one of MAX_SEQ_LEN with the title
-#
-#    'title' { 'input_ids', 'attention_mask', 'token_type_ids' } }  # title for the input text.
-# Inputs have no size constraints but will always be a multiple of MAX_SEQ_LEN.
+#  { 'text' { input_ids_as_tensor },
+#    'title' { input_ids_as_tensor } }
 def map_tokenize_news(processed):
+    text = processed['content']
+    text_enc = tok.encode(text, add_special_tokens=False, max_length=None, pad_to_max_length=False)
 
-    text = tok.bos_token + processed['content'] + tok.eos_token
-    text_enc = tok.encode_plus(text, add_special_tokens=True, max_length=None, pad_to_max_length=False,
-                               return_token_type_ids=True, return_attention_mask=True)
-    # Pad to a multiple of MAX_SEQ_LEN. Pad left for XLNet. (why Google...)
-    insertion_index = int(len(text_enc['input_ids']) / MAX_SEQ_LEN) * MAX_SEQ_LEN
-    while len(text_enc['input_ids']) % MAX_SEQ_LEN is not 0:
-        text_enc['input_ids'].insert(insertion_index, tok.pad_token_id)
-        text_enc['attention_mask'].insert(insertion_index, 0)
-        text_enc['token_type_ids'].insert(insertion_index, 0)
-
-    title = tok.cls_token + tok.bos_token + processed['title'] + tok.eos_token
+    title = processed['title']
     # Insert the title as the second sentence, forcing the proper token types.
-    title_enc = tok.encode_plus("", title, add_special_tokens=True, max_length=MAX_TITLE_LEN, pad_to_max_length=True,
-                                return_token_type_ids=True, return_attention_mask=True)
+    title_enc = tok.encode(title, add_special_tokens=False, max_length=None, pad_to_max_length=False)
 
     # Push resultants to a simple list and return it
-    return {'text': text_enc, 'title': title_enc}
-
-
-# Reduces a list of outputs from map_tokenize_reviews into a single list by combining across the given maps.
-# Shuffles everything, then attempts to reduce to sets of reviews that can be broken up into the same set of MAX_SEQ_LEN
-#   sequences. E.g: [<sentences that require 4 MAX_SEQ_LEN sequences>, ...
-#                    <sentences that require 3 MAX_SEQ_LEN sequences>, ...
-#                    <sentences that require 2 MAX_SEQ_LEN sequences>, ... ]
-
-def reduce_tokenized_news(all_news):
-    random.shuffle(all_news)
-    list_of_multiples = []
-    for processed in all_news:
-        index = len(processed['text']['input_ids']) / MAX_SEQ_LEN
-        while len(list_of_multiples) <= index:
-            list_of_multiples.append([])
-        list_of_multiples[int(index)].append(processed)
-
-    # Only accept a multiple if there is at least 128 entries in it.
-    list_of_multiples = [l for l in list_of_multiples if len(l) >= 128]
-    return list_of_multiples
+    return {'text': torch.tensor(text_enc, dtype=torch.long), 'target': torch.tensor(title_enc, dtype=torch.long)}
 
 if __name__ == '__main__':
     # Fetch the news.
     folder = "C:/Users/jbetk/Documents/data/ml/title_prediction/"
     os.chdir(folder + "all-the-news/")
-    #files = ['test.csv']
     files = glob.glob("*.csv")
+    output_folder = '/'.join([folder, "outputs"])
 
     # Basic workflow:
     # process_files individually and compile into a list.
@@ -107,22 +73,13 @@ if __name__ == '__main__':
     print("Tokenizing news..")
     p = Pool(23)
     all_news = p.map(map_tokenize_news, all_texts)
-    all_news = reduce_tokenized_news(all_news)
-    print("Combining tokenized news")
 
     print("Writing news to output file.")
-    val_news = []
-    train_news = []
-    # Pull 64 articles from each multiple set for validation purposes.
-    for multiple_list in all_news:
-        val_news.append(multiple_list[0:32])
-        train_news.append(multiple_list[32:-1])
+    random.shuffle(all_news)
+    val_news = all_news[0:2048]
+    test_news = all_news[2048:6144]
+    train_news = all_news[6144:]
 
-    # Push the news to an output file.
-    with open(folder + "outputs/processed.json", "wb") as output_file:
-        output_file.write(orjson.dumps(train_news))
-        output_file.close()
-
-    with open(folder + "outputs/validation.json", "wb") as output_file:
-        output_file.write(orjson.dumps(val_news))
-        output_file.close()
+    torch.save(train_news, '/'.join([output_folder, "train.pt"]))
+    torch.save(val_news, '/'.join([output_folder, "val.pt"]))
+    torch.save(test_news, '/'.join([output_folder, "test.pt"]))

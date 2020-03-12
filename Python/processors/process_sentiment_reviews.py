@@ -1,5 +1,5 @@
 import orjson
-from transformers import (BertTokenizer, DistilBertTokenizer, GPT2Tokenizer)
+from transformers import (BertTokenizer, DistilBertTokenizer, GPT2Tokenizer, AlbertTokenizer)
 import random
 import glob, os
 import time
@@ -119,13 +119,13 @@ if is_gpt2:
     tok = GPT2Tokenizer.from_pretrained("gpt2")
     tok.pad_token = "<|endoftext|>"
 else:
-    tok = BertTokenizer.from_pretrained("bert-base-cased")
+    tok = AlbertTokenizer.from_pretrained("albert-large-v2")
 
 # This is a map function for processing reviews. It returns a list of tokenized
 # reviews and labels.
 def map_tokenize_reviews(review):
     pad_token = 0
-    max_seq_len = 512
+    max_seq_len = 128
 
     sentence = review['sentence']
     if is_gpt2:
