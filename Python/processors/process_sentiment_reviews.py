@@ -1,5 +1,10 @@
 import orjson
-from transformers import (BertTokenizer, DistilBertTokenizer, GPT2Tokenizer, AlbertTokenizer)
+from transformers import (
+    BertTokenizer,
+    DistilBertTokenizer,
+    GPT2Tokenizer,
+    AlbertTokenizer,
+)
 import random
 import glob, os
 import time
@@ -22,15 +27,16 @@ from multiprocessing import Pool
 #  sentence (string)
 #  label (integer)
 def process_amazon_entry(entry, min_helpful=0, max_words=0):
-    if not 'helpful' in entry:
+    if not "helpful" in entry:
         return None
-    if entry['helpful'][0] < min_helpful:
+    if entry["helpful"][0] < min_helpful:
         return None
-    if entry['reviewText'].count(' ') + 1 > max_words:
+    if entry["reviewText"].count(" ") + 1 > max_words:
         return None
-    return {'sentence': entry['reviewText'],
-            'label': int(entry['overall']),
-            }
+    return {
+        "sentence": entry["reviewText"],
+        "label": int(entry["overall"]),
+    }
 
 
 # This function processes Amazon reviews derived from the reviews.json dataset available here:
@@ -46,15 +52,16 @@ def process_amazon_entry(entry, min_helpful=0, max_words=0):
 #  sentence (string)
 #  label (integer)
 def process_yelp_entry(entry, min_helpful=0, max_words=0):
-    if not 'business_id' in entry:
+    if not "business_id" in entry:
         return None
-    if entry['useful'] < min_helpful:
+    if entry["useful"] < min_helpful:
         return None
-    if entry['text'].count(' ') + 1 > max_words:
+    if entry["text"].count(" ") + 1 > max_words:
         return None
-    return {'sentence': entry['text'],
-            'label': int(entry['stars']),
-            }
+    return {
+        "sentence": entry["text"],
+        "label": int(entry["stars"]),
+    }
 
 
 def process_file(filepath):
@@ -65,12 +72,12 @@ def process_file(filepath):
             entry = orjson.loads(line)
             pent = None
             # Do a simple inference on the type of the file being passed in based on the fields provided.
-            if 'business_id' in entry:
+            if "business_id" in entry:
                 pent = process_yelp_entry(entry, min_helpful=2, max_words=300)
-            elif 'asin' in entry:
+            elif "asin" in entry:
                 pent = process_amazon_entry(entry, min_helpful=2, max_words=300)
             if pent:
-                result[pent['label'] - 1].append(pent)
+                result[pent["label"] - 1].append(pent)
             line = file.readline()
     return result
 
@@ -114,6 +121,7 @@ def reduce_file_reads(list_of_results):
 
     return balanced_reviews
 
+
 is_gpt2 = False
 if is_gpt2:
     tok = GPT2Tokenizer.from_pretrained("gpt2")
@@ -127,35 +135,42 @@ def map_tokenize_reviews(review):
     pad_token = 0
     max_seq_len = 128
 
-    sentence = review['sentence']
+    sentence = review["sentence"]
     if is_gpt2:
         # Add a space prefix to the sentence before tokenizing for GPT-2 (and byte-encoded) models.
         sentence = " " + sentence
-    input = tok.encode_plus(sentence, add_special_tokens=True, max_length=max_seq_len, pad_to_max_length=True)
+    input = tok.encode_plus(
+        sentence,
+        add_special_tokens=True,
+        max_length=max_seq_len,
+        pad_to_max_length=True,
+    )
     input_ids, token_type_ids = input["input_ids"], input["token_type_ids"]
     attention_mask = [0] * len(input_ids)
 
     # Push resultants to a simple list and return it
-    return [input_ids, attention_mask, token_type_ids, review['label']]
+    return [input_ids, attention_mask, token_type_ids, review["label"]]
 
 
 # Reduces a list of outputs from map_tokenize_reviews into a single list by combining across the internal maps.
 def reduce_tokenized_reviews(reviews):
-    result = {'input_id': [],
-              'attention_mask': [],
-              'token_type_id': [],
-              'label': [],
-              }
+    result = {
+        "input_id": [],
+        "attention_mask": [],
+        "token_type_id": [],
+        "label": [],
+    }
     for review in reviews:
         for (i, k) in enumerate(result.keys()):
             result[k].append(review[i])
     return result
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # Fetch the reviews.
     folder = "C:/Users/jbetk/Documents/data/ml/sentiment_analysis/"
     os.chdir(folder + "amazon/")
-    #files = []
+    # files = []
     files = glob.glob("*.json")
     files.append(folder + "yelp/review.json")
 

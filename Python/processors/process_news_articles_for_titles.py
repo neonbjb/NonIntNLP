@@ -19,18 +19,17 @@ def process_csv_line(line):
     splitted = line.split(",")
 
     # Once the "content" line begins, any number of commas can appear before the newline which must not be parsed.
-    rejoined_content = ','.join(splitted[CONTENT_INDEX:-1])
+    rejoined_content = ",".join(splitted[CONTENT_INDEX:-1])
     if len(rejoined_content) < 128:
         return None
 
-    return {'title': splitted[TITLE_INDEX],
-            'content': rejoined_content
-            }
+    return {"title": splitted[TITLE_INDEX], "content": rejoined_content}
+
 
 # Processes the entire file.
 def process_file(filepath):
     result = []
-    with open(filepath, encoding='utf-8') as file:
+    with open(filepath, encoding="utf-8") as file:
         line = file.readline()
         while line:
             processed = process_csv_line(line)
@@ -39,28 +38,37 @@ def process_file(filepath):
             line = file.readline()
     return result
 
+
 tok = XLNetTokenizer.from_pretrained("xlnet-base-cased")
 
 # This is a map function for processing reviews. It returns a dict:
 #  { 'text' { input_ids_as_tensor },
 #    'title' { input_ids_as_tensor } }
 def map_tokenize_news(processed):
-    text = processed['content']
-    text_enc = tok.encode(text, add_special_tokens=False, max_length=None, pad_to_max_length=False)
+    text = processed["content"]
+    text_enc = tok.encode(
+        text, add_special_tokens=False, max_length=None, pad_to_max_length=False
+    )
 
-    title = processed['title']
+    title = processed["title"]
     # Insert the title as the second sentence, forcing the proper token types.
-    title_enc = tok.encode(title, add_special_tokens=False, max_length=None, pad_to_max_length=False)
+    title_enc = tok.encode(
+        title, add_special_tokens=False, max_length=None, pad_to_max_length=False
+    )
 
     # Push resultants to a simple list and return it
-    return {'text': torch.tensor(text_enc, dtype=torch.long), 'target': torch.tensor(title_enc, dtype=torch.long)}
+    return {
+        "text": torch.tensor(text_enc, dtype=torch.long),
+        "target": torch.tensor(title_enc, dtype=torch.long),
+    }
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # Fetch the news.
     folder = "C:/Users/jbetk/Documents/data/ml/title_prediction/"
     os.chdir(folder + "all-the-news/")
     files = glob.glob("*.csv")
-    output_folder = '/'.join([folder, "outputs"])
+    output_folder = "/".join([folder, "outputs"])
 
     # Basic workflow:
     # process_files individually and compile into a list.
@@ -80,6 +88,6 @@ if __name__ == '__main__':
     test_news = all_news[2048:6144]
     train_news = all_news[6144:]
 
-    torch.save(train_news, '/'.join([output_folder, "train.pt"]))
-    torch.save(val_news, '/'.join([output_folder, "val.pt"]))
-    torch.save(test_news, '/'.join([output_folder, "test.pt"]))
+    torch.save(train_news, "/".join([output_folder, "train.pt"]))
+    torch.save(val_news, "/".join([output_folder, "val.pt"]))
+    torch.save(test_news, "/".join([output_folder, "test.pt"]))
