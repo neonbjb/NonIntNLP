@@ -1,16 +1,16 @@
 import transformers
 import torch
 import os
-import time
 
 
 model_name = "xlnet-base-cased"
 
-CHUNK_SEQ_LEN = 128
-TITLE_PRED_MAX_LEN = 64
+CHUNK_SEQ_LEN = 256
+TITLE_PRED_MAX_LEN = 32
 
 # Load model
-output_dir = os.path.join("c:/Users/jbetk/Documents/data/ml/saved_models", "xlnet_title_generation")
+#output_dir = "C:/drive/Projects/ML/colab/saved_models/3_13_2020_xlnet_title_gen/xlnet_title_generation"
+output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_title_generation/colab-eos-gen"
 tokenizer = transformers.XLNetTokenizer.from_pretrained(model_name)
 config = transformers.XLNetConfig.from_pretrained(model_name)
 config.mem_len = 1024
@@ -36,131 +36,121 @@ The hotel, in the southeastern city of Quanzhou, in Fujian province, came down S
 "We are using life detection instruments to monitor signs of life and professional breaking-in tools to make forcible entries. We are trying our utmost to save trapped people," said Guo Yutuan, squadron leader of the Quanzhou armed police detachment's mobile unit.
 The building's owner is in police custody, according to state news agency Xinhua and an investigation is underway.
 """
-actual_article_title = "House Republicans Fret About Winning Their Health Care Suit - The New York Times"
+
 article_text = """
-WASHINGTON  —   
-Congressional Republicans have a new fear when it comes to their    health care lawsuit against the Obama administration: They might win. The 
-incoming Trump administration could choose to no longer defend the executive branch against the suit, which challenges the administration’s
- authority to spend billions of dollars on health insurance subsidies for   and   Americans, handing House Republicans a big victory on    issues.
-  But a sudden loss of the disputed subsidies could conceivably cause the health care program to implode, leaving millions of people without access to 
-  health insurance before Republicans have prepared a replacement. That could lead to chaos in the insurance market and spur a political backlash just as
-   Republicans gain full control of the government. To stave off that outcome, Republicans could find themselves in the awkward position of appropriating 
-   huge sums to temporarily prop up the Obama health care law, angering conservative voters who have been demanding an end to the law for years. In another 
-   twist, Donald J. Trump’s administration, worried about preserving executive branch prerogatives, could choose to fight its Republican allies in the House 
-   on some central questions in the dispute. Eager to avoid an ugly political pileup, Republicans on Capitol Hill and the Trump transition team are gaming 
-   out how to handle the lawsuit, which, after the election, has been put in limbo until at least late February by the United States Court of Appeals for the
-    District of Columbia Circuit. They are not yet ready to divulge their strategy. “Given that this pending litigation involves the Obama administration and 
-    Congress, it would be inappropriate to comment,” said Phillip J. Blando, a spokesman for the Trump transition effort. “Upon taking office, the Trump
-     administration will evaluate this case and all related aspects of the Affordable Care Act. ” In a potentially   decision in 2015, Judge Rosemary M. 
-     Collyer ruled that House Republicans had the standing to sue the executive branch over a spending dispute and that the Obama administration had been 
-     distributing the health insurance subsidies, in violation of the Constitution, without approval from Congress. The Justice Department, confident that 
-     Judge Collyer’s decision would be reversed, quickly appealed, and the subsidies have remained in place during the appeal. In successfully seeking a 
-     temporary halt in the proceedings after Mr. Trump won, House Republicans last month told the court that they “and the  ’s transition team currently 
-     are discussing potential options for resolution of this matter, to take effect after the  ’s inauguration on Jan. 20, 2017. ” The suspension of the 
-     case, House lawyers said, will “provide the   and his future administration time to consider whether to continue prosecuting or to otherwise resolve 
-     this appeal. ” Republican leadership officials in the House acknowledge the possibility of “cascading effects” if the   payments, which have totaled 
-     an estimated $13 billion, are suddenly stopped. Insurers that receive the subsidies in exchange for paying    costs such as deductibles and   for 
-     eligible consumers could race to drop coverage since they would be losing money. Over all, the loss of the subsidies could destabilize the entire 
-     program and cause a lack of confidence that leads other insurers to seek a quick exit as well. Anticipating that the Trump administration might not be 
-     inclined to mount a vigorous fight against the House Republicans given the  ’s dim view of the health care law, a team of lawyers this month sought to 
-     intervene in the case on behalf of two participants in the health care program. In their request, the lawyers predicted that a deal between House 
-     Republicans and the new administration to dismiss or settle the case “will produce devastating consequences for the individuals who receive these 
-     reductions, as well as for the nation’s health insurance and health care systems generally. ” No matter what happens, House Republicans say, they want to prevail on two overarching concepts: the congressional power of the purse, and the right of Congress to sue the executive branch if it violates the Constitution regarding that spending power. House Republicans contend that Congress never appropriated the money for the subsidies, as required by the Constitution. In the suit, which was initially championed by John A. Boehner, the House speaker at the time, and later in House committee reports, Republicans asserted that the administration, desperate for the funding, had required the Treasury Department to provide it despite widespread internal skepticism that the spending was proper. The White House said that the spending was a permanent part of the law passed in 2010, and that no annual appropriation was required  —   even though the administration initially sought one. Just as important to House Republicans, Judge Collyer found that Congress had the standing to sue the White House on this issue  —   a ruling that many legal experts said was flawed  —   and they want that precedent to be set to restore congressional leverage over the executive branch. But on spending power and standing, the Trump administration may come under pressure from advocates of presidential authority to fight the House no matter their shared views on health care, since those precedents could have broad repercussions. It is a complicated set of dynamics illustrating how a quick legal victory for the House in the Trump era might come with costs that Republicans never anticipated when they took on the Obama White House.
+Safety concerns accompanied by strong winds and power outages in ski country forced Eldora Mountain to stay closed on Thursday, March 12. As of 7:56 AM, the resort announced the closure of all lifts due to “power outages, high winds, and safety concerns.”
+Wind gusts are forecast to reach up to 20 mph in Nederland, with winds of up to 11 mph expected for the Boulder area.Elsewhere in ski country, specifically at Aspen, concerns have been raised about a possible COVID-19 outbreak. Polis has urged those older than 60 to avoid high country travel due to the virus. 
+There has been no indication that COVID-19 had anything to do with the “safety concerns” that shut down Eldora.
+Safety concerns that shut down Eldora are likely wind-related. While wind-related lift closures are common for resorts in the high country, full closures are typically rare. It’s reasonable to believe that the resort will reopen tomorrow if winds subside, but find official updates here.
 """
 
+article_text = """
+A little under a year and a half after it released its first pair of true wireless earbuds, Sennheiser is back with a follow-up: the Sennheiser Momentum True Wireless 2. The big improvements to the true wireless earbuds are that they support noise cancellation and have much better battery life. There are also some more minor improvements, like the fact that these earbuds are 2mm smaller than their predecessors.
 
-def prepare_chunked_inputs(_batched_inputs, _max_seq_len, _max_title_len):
-    # We need to do a lot more data preparation before feeding into the model.
-    # First, chunk the batch into a list of tensors each of size max_seq_len.
-    with torch.no_grad():
-        _batch_sz = _batched_inputs[0].shape[0]
-        _nr_chunks = int(_batched_inputs[0].shape[-1] / _max_seq_len)
-        _batch_inputs = _batched_inputs[0:3]
-        _chunked_batch_inputs_by_input_nr = [torch.chunk(_bi, _nr_chunks, -1) for _bi in _batch_inputs]
-        _chunked_batch_inputs = []
+The improvements in battery life are, on paper, at least, pretty impressive. You’ll now get up to seven hours of playback from the earbuds themselves (up from four hours last time around), and using the case gets you 28 hours in total (up from 12). Sennheiser also claims to have fixed the battery drain problems that some users reported with the first-generation earbuds. 
+It says it’s switch to a new Bluetooth chip that “counteracts any power drain possibilities.
 
-        # These tensors will be used to append on to the input tensors where the prediction will occur.
-        _input_mask_tensor = torch.full((_batch_sz, _max_title_len), tokenizer.mask_token_id, dtype=torch.long)
-        _ones_float_tensor_for_title = torch.ones((_batch_sz, _max_title_len), dtype=torch.float)
-        _ones_long_tensor_for_title = torch.ones((_batch_sz, _max_title_len), dtype=torch.long)
-        for i in range(_nr_chunks):
-            # For the input_ids (index 0), append on _max_title_len masks.
-            _chunked_input_ids = torch.cat([_chunked_batch_inputs_by_input_nr[0][i], _input_mask_tensor], dim=-1)
-            # For the attention mask, just add all 1s because this is not padding.
-            _chunked_attention_mask = torch.cat([_chunked_batch_inputs_by_input_nr[1][i], _ones_float_tensor_for_title],
-                                                dim=-1)
-            # For token type IDs, also all 1s since this is the "second sentence".
-            _chunked_token_type_ids = torch.cat([_chunked_batch_inputs_by_input_nr[2][i], _ones_long_tensor_for_title],
-                                                dim=-1)
-            _chunked_batch_inputs.append([_chunked_input_ids, _chunked_attention_mask, _chunked_token_type_ids])
+Rounding out the specs, the Sennheiser Momentum True Wireless 2 come with support for the Bluetooth 5.1, AAC, and AptX standards, an IPX4 water resistance rating, and have an audio passthrough mode alongside their noise-canceling mode. You can listen to just one earbud at a time, but the functionality only works with the right earbud, unfortunately. They’ll retail for $299.99 (£279.99 / €299.99), the same as their predecessors.
 
-        # Create a target mapping that will be used for all inputs, since they all follow a similar format.
-        _target_mapping = torch.zeros((_batch_sz, _max_title_len, _max_seq_len + _max_title_len), dtype=torch.float)
-        for i in range(_max_title_len):
-            for b in range(_batch_sz):
-                _target_mapping[b][i][_max_seq_len + i] = 1
+We were impressed with the first-generation Sennheiser Momentum True Wireless when we reviewed them back in 2018, noting at the time that they were the best-sounding true wireless earbuds we’d ever heard. However, functionally, they left a little to be desired, with flaky wireless connectivity and controls that were a little unintuitive at first. And those battery drain problems were never fully addressed. We’ll be checking out whether their successors have been able to overcome these problems in our full review, which will be on the way soon.
 
-        # Next, gather the expected output IDs and generate the 'labels' format that transformers is expecting.
-        _labels = _batched_inputs[3]
-    return _chunked_batch_inputs, _target_mapping, _labels
+The Sennheiser Momentum True Wireless 2 will be available in the US and Europe in black starting in April, with a white variant following later.”
+"""
+import math
 
-def chunk_to_inputs(_chunk, _target_mapping, _labels, _mems, _device):
-    _inputs = {"input_ids": _chunk[0],
-               "attention_mask": _chunk[1],
-               "token_type_ids": _chunk[2],
-               "target_mapping": _target_mapping}
 
-    if _labels is not None:
-        _inputs["labels"] = _labels
+# Create inputs to the model for a given chunk of input_ids and a partially generated output.
+def create_inputs_for_chunk(_chunk: torch.Tensor,
+                            _outputs_so_far: torch.Tensor,
+                            _mems: torch.Tensor,
+                            _tokenizer: transformers.PreTrainedTokenizer,
+                            _seq_len: int,
+                            _title_len: int,
+                            _test_device: torch.device):
+    assert (_outputs_so_far.shape[0] == _title_len)
 
-    # Don't forget to send all these tensors to the device.
-    for i, (k, v) in enumerate(_inputs.items()):
-        _inputs[k] = v.to(_device)
-
-    # Mems will just stay on-device, so add them last.
+    _input_ids = torch.cat([_chunk, _outputs_so_far]).unsqueeze(dim=0)
+    #_attention_mask = torch.cat([torch.zeros((_padding_needed,), dtype=torch.float),
+    #                             torch.ones((_seq_len - _padding_needed), dtype=torch.float)]).unsqueeze(dim=0)
+    _token_type_ids = torch.cat([torch.zeros((_seq_len - _title_len), dtype=torch.long),
+                                 torch.ones((_title_len,), dtype=torch.long)]).unsqueeze(dim=0)
+    _inputs = {
+        "input_ids": _input_ids.to(_test_device),
+        #"attention_mask": _attention_mask.to(_test_device),
+        "token_type_ids": _token_type_ids.to(_test_device)
+    }
     if _mems is not None:
         _inputs["mems"] = _mems
     return _inputs
 
-def test_model(_text_input, _test_model, _test_tokenizer, _seq_len, _title_len, _test_device):
-    _tokenized_text_plus = _test_tokenizer.encode_plus(_text_input, add_special_tokens=True, max_length=None,
-                                                pad_to_max_length=False,
-                                                return_token_type_ids=True, return_attention_mask=True)
-    # Pad each input to make it a multiple of _seq_len
-    insertion_index = int(len(_tokenized_text_plus['input_ids']) / _seq_len) * _seq_len
-    while len(_tokenized_text_plus['input_ids']) % _seq_len is not 0:
-        _tokenized_text_plus['input_ids'].insert(insertion_index, tokenizer.pad_token_id)
-        _tokenized_text_plus['attention_mask'].insert(insertion_index, 0)
-        _tokenized_text_plus['token_type_ids'].insert(insertion_index, 0)
 
-    _title = _test_tokenizer.cls_token + _test_tokenizer.bos_token + actual_article_title + _test_tokenizer.eos_token
-    # Insert the title as the second sentence, forcing the proper token types.
-    _title_enc = _test_tokenizer.encode_plus("", _title, add_special_tokens=True, max_length=_title_len, pad_to_max_length=True,
-                                return_token_type_ids=True, return_attention_mask=True)
+# Returns top-k words the model predicts given _text_tensor and computed _outputs_so_far.
+def predict_words(_text_tensor: torch.Tensor,
+                  _outputs_so_far: torch.Tensor,
+                  _predict_index: int,
+                  _tokenizer: transformers.PreTrainedTokenizer,
+                  _test_model: transformers.PreTrainedModel,
+                  _seq_len: int,
+                  _title_len: int,
+                  _test_device: torch.device,
+                  _k_count=3):
+    _max_text_len = _seq_len - _title_len
+    _chunk_count = math.ceil(_text_tensor.shape[0] / _max_text_len)
+    _seq_len_needed = _chunk_count * _max_text_len
+    _pads_needed = _seq_len_needed - _text_tensor.shape[0]
+    _pad_tensor = torch.full((_pads_needed,), _tokenizer.pad_token_id, dtype=torch.long)
+    _text_tensor = torch.cat([_pad_tensor, _text_tensor])
 
-    _test_batch = [torch.tensor(_tokenized_text_plus['input_ids'], dtype=torch.long).unsqueeze(0),
-                   torch.tensor(_tokenized_text_plus['attention_mask'], dtype=torch.float).unsqueeze(0),
-                   torch.tensor(_tokenized_text_plus['token_type_ids'], dtype=torch.long).unsqueeze(0),
-                   torch.tensor(_title_enc['input_ids'], dtype=torch.long).unsqueeze(0)]
+    _tok_text_chunked = torch.chunk(_text_tensor, _chunk_count, dim=0)
+    _mems = None
+    for _chunk in _tok_text_chunked:
+        _inputs = create_inputs_for_chunk(_chunk, _outputs_so_far, _mems, _tokenizer, _seq_len, _title_len, _test_device)
+        _logits, _mems = _test_model.forward(**_inputs)
 
-    _test_chunked_batch_inputs, _test_target_mapping, _test_labels = prepare_chunked_inputs(_test_batch, _seq_len,
-                                                                                            _title_len)
-    _test_num_chunks = len(_test_chunked_batch_inputs)
+    _p_sft = torch.softmax(_logits[0], dim=-1)
+    _probs, _words = torch.topk(_p_sft, 1)
+    print("Last chunk with completion: '%s'" % _tokenizer.decode(_words))
 
-    _test_mems = None
-    _test_loss = None
-    _test_chunk_loss_schedule = []
-    _test_logits = None
+    # Remove the batch dimension.
+    _logits = torch.softmax(_logits[0][_predict_index + _chunk.shape[0]], dim=-1)
+    return torch.topk(_logits, _k_count)
+
+
+def predict_forward(_text_tensor: torch.Tensor,
+                    _predict_tensor: torch.Tensor,
+                    _predict_index: int,
+                    _tokenizer: transformers.PreTrainedTokenizer,
+                    _test_model: transformers.PreTrainedModel,
+                    _seq_len: int,
+                    _title_len: int,
+                    _test_device: torch.device):
+    if _predict_index == _title_len:
+        return _predict_tensor
+    _probs, _words = predict_words(_text_tensor, _predict_tensor, _predict_index, _tokenizer, _test_model, _seq_len, _title_len, _test_device,
+                           3)
+    for _prob, _word in zip(_probs, _words):
+        print("Predict %s at %f probability" % (_tokenizer.decode([_word]), _prob))
+    _predict_tensor[_predict_index] = _words[0]
+    if _predict_tensor[_predict_index] == _tokenizer.eos_token_id:
+        return _predict_tensor
+    return predict_forward(_text_tensor, _predict_tensor, _predict_index + 1, _tokenizer, _test_model, _seq_len,
+                           _title_len, _test_device)
+
+
+def test_model(_text_input: str,
+               _tokenizer: transformers.PreTrainedTokenizer,
+               _test_model: transformers.PreTrainedModel,
+               _seq_len: int,
+               _title_len: int,
+               _test_device: torch.device):
     with torch.no_grad():
-        _chunk_nr = 1
-        for _test_chunk in _test_chunked_batch_inputs:
-            print("Processing chunk %i.." % (_chunk_nr))
-            _test_inputs = chunk_to_inputs(_test_chunk, _test_target_mapping, _test_labels, _test_mems, _test_device)
-            # I'm assuming no loss is returned since I'm not giving it any labels - may need to adjust this.
-            _test_loss, _test_logits, _test_mems = _test_model.forward(**_test_inputs)
-            _test_chunk_loss_schedule.append(_test_loss.item())
-            _chunk_nr += 1
-        _test_logits_argmax = torch.argmax(_test_logits, dim=-1)
-        return tokenizer.decode(_test_logits_argmax[0].numpy())
+        _tok_text = torch.tensor(
+            _tokenizer.encode(_tokenizer.bos_token + _text_input + _tokenizer.sep_token, add_special_tokens=False),
+            dtype=torch.long)
+        _tok_title = torch.full((_title_len,), _tokenizer.mask_token_id, dtype=torch.long)
+        _predicted_tensor = predict_forward(_tok_text, _tok_title, 0, _tokenizer, _test_model, _seq_len, _title_len,
+                                            _test_device)
+        return _tokenizer.decode(_predicted_tensor)
 
-print(test_model(article_text, model, tokenizer, 128, 64, "cpu"))
+
+print(test_model(article_text, tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device("cpu")))
