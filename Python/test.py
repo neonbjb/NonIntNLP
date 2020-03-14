@@ -9,8 +9,7 @@ CHUNK_SEQ_LEN = 256
 TITLE_PRED_MAX_LEN = 32
 
 # Load model
-#output_dir = "C:/drive/Projects/ML/colab/saved_models/3_13_2020_xlnet_title_gen/xlnet_title_generation"
-output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_title_generation/colab-eos-gen"
+output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_title_generation/colab-title-first"
 tokenizer = transformers.XLNetTokenizer.from_pretrained(model_name)
 config = transformers.XLNetConfig.from_pretrained(model_name)
 config.mem_len = 1024
@@ -19,7 +18,7 @@ model.eval()
 
 # Test the model.
 actual_article_title = "Italy announces lockdown as global coronavirus cases surpass 105,000"
-article_text = """
+article_text1 = """
 Italian Prime Minister Giuseppe Conte signed a decree early Sunday that will put millions of people across northern Italy under lockdown due to the novel coronavirus.
 The sweeping move puts the entire Lombardy region, as well as 14 other provinces, under travel restrictions, and is one of the toughest responses implemented outside of mainland China to get the Covid-19 epidemic under control.
 CNN is verifying exactly when the lockdown will go into effect.
@@ -37,14 +36,14 @@ The hotel, in the southeastern city of Quanzhou, in Fujian province, came down S
 The building's owner is in police custody, according to state news agency Xinhua and an investigation is underway.
 """
 
-article_text = """
+article_text2 = """
 Safety concerns accompanied by strong winds and power outages in ski country forced Eldora Mountain to stay closed on Thursday, March 12. As of 7:56 AM, the resort announced the closure of all lifts due to “power outages, high winds, and safety concerns.”
 Wind gusts are forecast to reach up to 20 mph in Nederland, with winds of up to 11 mph expected for the Boulder area.Elsewhere in ski country, specifically at Aspen, concerns have been raised about a possible COVID-19 outbreak. Polis has urged those older than 60 to avoid high country travel due to the virus. 
 There has been no indication that COVID-19 had anything to do with the “safety concerns” that shut down Eldora.
 Safety concerns that shut down Eldora are likely wind-related. While wind-related lift closures are common for resorts in the high country, full closures are typically rare. It’s reasonable to believe that the resort will reopen tomorrow if winds subside, but find official updates here.
 """
 
-article_text = """
+article_text3 = """
 A little under a year and a half after it released its first pair of true wireless earbuds, Sennheiser is back with a follow-up: the Sennheiser Momentum True Wireless 2. The big improvements to the true wireless earbuds are that they support noise cancellation and have much better battery life. There are also some more minor improvements, like the fact that these earbuds are 2mm smaller than their predecessors.
 
 The improvements in battery life are, on paper, at least, pretty impressive. You’ll now get up to seven hours of playback from the earbuds themselves (up from four hours last time around), and using the case gets you 28 hours in total (up from 12). Sennheiser also claims to have fixed the battery drain problems that some users reported with the first-generation earbuds. 
@@ -56,6 +55,23 @@ We were impressed with the first-generation Sennheiser Momentum True Wireless wh
 
 The Sennheiser Momentum True Wireless 2 will be available in the US and Europe in black starting in April, with a white variant following later.”
 """
+
+article_text4 = """
+Trump is already under fire for visiting his properties in both countries as president, leading to U.S. taxpayer money being spent at his own firms.
+ The president has been saddled with lawsuits and investigations throughout his term alleging that he’s violating the Constitution’s emoluments clause 
+ by accepting taxpayer money other than his salary. The U.S. government proclamation initiating the ban targets 26 European countries that comprise a 
+ visa-free travel zone known as the Schengen Area. The United Kingdom, which is home to Trump Turnberry and Trump International Golf Links, and Ireland, 
+ which is home to another Trump-branded hotel and golf course at Doonbeg, don't participate in the Schengen Area. Bulgaria, Croatia and Romania are also
+  not part of the Schengen Area. All three of the resorts are struggling financially. Ireland’s prime minister, Leo Varadkar, is scheduled to meet Trump 
+  at the White House on Thursday in one of the few events related to St. Patrick’s Day that has not been canceled due to coronavirus concerns. 
+  The administration’s European travel proclamation notes that “the Schengen Area has exported 201 COVID-19 cases to 53 countries. Moreover, the
+   free flow of people between the Schengen Area countries makes the task of managing the spread of the virus difficult.” Trump’s European travel ban comes 
+   with several other loopholes. Though they are subject to border checks on arrival, residents of the 26 Schengen Area countries are also free to live and 
+   work in the United Kingdom, meaning they could fly to the United States from a British airport as long as they hadn't spent time within the Schengen 
+   countries in the last 14 days. EU leaders condemned Trump's move on Thursday, and disputed the president's criticism of Europe's handling of the crisis. 
+   “The Coronavirus is a global crisis, not limited to any continent and it requires cooperation rather than unilateral action,” European Commission President 
+   Ursula von der Leyen and European Council President Charles Michel said in a joint statement.
+"""
 import math
 
 
@@ -64,20 +80,10 @@ def create_inputs_for_chunk(_chunk: torch.Tensor,
                             _outputs_so_far: torch.Tensor,
                             _mems: torch.Tensor,
                             _tokenizer: transformers.PreTrainedTokenizer,
-                            _seq_len: int,
-                            _title_len: int,
                             _test_device: torch.device):
-    assert (_outputs_so_far.shape[0] == _title_len)
-
-    _input_ids = torch.cat([_chunk, _outputs_so_far]).unsqueeze(dim=0)
-    #_attention_mask = torch.cat([torch.zeros((_padding_needed,), dtype=torch.float),
-    #                             torch.ones((_seq_len - _padding_needed), dtype=torch.float)]).unsqueeze(dim=0)
-    _token_type_ids = torch.cat([torch.zeros((_seq_len - _title_len), dtype=torch.long),
-                                 torch.ones((_title_len,), dtype=torch.long)]).unsqueeze(dim=0)
+    _input_ids = torch.cat([_outputs_so_far, _chunk]).unsqueeze(dim=0)
     _inputs = {
-        "input_ids": _input_ids.to(_test_device),
-        #"attention_mask": _attention_mask.to(_test_device),
-        "token_type_ids": _token_type_ids.to(_test_device)
+        "input_ids": _input_ids.to(_test_device)
     }
     if _mems is not None:
         _inputs["mems"] = _mems
@@ -104,7 +110,7 @@ def predict_words(_text_tensor: torch.Tensor,
     _tok_text_chunked = torch.chunk(_text_tensor, _chunk_count, dim=0)
     _mems = None
     for _chunk in _tok_text_chunked:
-        _inputs = create_inputs_for_chunk(_chunk, _outputs_so_far, _mems, _tokenizer, _seq_len, _title_len, _test_device)
+        _inputs = create_inputs_for_chunk(_chunk, _outputs_so_far, _mems, _tokenizer, _test_device)
         _logits, _mems = _test_model.forward(**_inputs)
 
     _p_sft = torch.softmax(_logits[0], dim=-1)
@@ -112,7 +118,7 @@ def predict_words(_text_tensor: torch.Tensor,
     print("Last chunk with completion: '%s'" % _tokenizer.decode(_words))
 
     # Remove the batch dimension.
-    _logits = torch.softmax(_logits[0][_predict_index + _chunk.shape[0]], dim=-1)
+    _logits = torch.softmax(_logits[0][_predict_index], dim=-1)
     return torch.topk(_logits, _k_count)
 
 
@@ -131,7 +137,7 @@ def predict_forward(_text_tensor: torch.Tensor,
     for _prob, _word in zip(_probs, _words):
         print("Predict %s at %f probability" % (_tokenizer.decode([_word]), _prob))
     _predict_tensor[_predict_index] = _words[0]
-    if _predict_tensor[_predict_index] == _tokenizer.eos_token_id:
+    if _predict_tensor[_predict_index] == _tokenizer.sep_token_id:
         return _predict_tensor
     return predict_forward(_text_tensor, _predict_tensor, _predict_index + 1, _tokenizer, _test_model, _seq_len,
                            _title_len, _test_device)
@@ -145,12 +151,12 @@ def test_model(_text_input: str,
                _test_device: torch.device):
     with torch.no_grad():
         _tok_text = torch.tensor(
-            _tokenizer.encode(_tokenizer.bos_token + _text_input + _tokenizer.sep_token, add_special_tokens=False),
+            _tokenizer.encode(_text_input + _tokenizer.eos_token, add_special_tokens=False),
             dtype=torch.long)
         _tok_title = torch.full((_title_len,), _tokenizer.mask_token_id, dtype=torch.long)
         _predicted_tensor = predict_forward(_tok_text, _tok_title, 0, _tokenizer, _test_model, _seq_len, _title_len,
                                             _test_device)
         return _tokenizer.decode(_predicted_tensor)
 
-
-print(test_model(article_text, tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device("cpu")))
+model.to("cuda")
+print(test_model(article_text4, tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device("cuda")))
