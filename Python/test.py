@@ -1,11 +1,13 @@
 import transformers
 import torch
 import math
+import json
 
 model_name = "xlnet-base-cased"
 
 CHUNK_SEQ_LEN = 256
 TITLE_PRED_MAX_LEN = 32
+DEVICE = "cuda"
 
 # Load model
 output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_title_generation/colab-title-first"
@@ -25,8 +27,11 @@ def create_inputs_for_chunk(_chunk: torch.Tensor,
                             _tokenizer: transformers.PreTrainedTokenizer,
                             _test_device: torch.device):
     _input_ids = torch.cat([_outputs_so_far, _chunk]).unsqueeze(dim=0)
+    _token_types = torch.cat([torch.zeros(_outputs_so_far.shape[0], dtype=torch.long),
+                              torch.ones(_chunk.shape[0], dtype=torch.long)]).unsqueeze(dim=0)
     _inputs = {
-        "input_ids": _input_ids.to(_test_device)
+        "input_ids": _input_ids.to(_test_device),
+        "token_type_ids": _token_types.to(_test_device)
     }
     if _mems is not None:
         _inputs["mems"] = _mems
@@ -52,7 +57,7 @@ def predict_words(_text_tensor: torch.Tensor,
 
     _tok_text_chunked = torch.chunk(_text_tensor, _chunk_count, dim=0)
     _mems = None
-    for _chunk in reversed(_tok_text_chunked):
+    for _chunk in _tok_text_chunked:
         _inputs = create_inputs_for_chunk(_chunk, _outputs_so_far, _mems, _tokenizer, _test_device)
         _logits, _mems = _test_model.forward(**_inputs)
 
@@ -119,16 +124,34 @@ def process_csv_line(line):
     return {"title": splitted[TITLE_INDEX], "content": rejoined_content}
 
 #for i in range(10):
-#    print(test_model(article_text4, tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device("cuda")))
+#    print(test_model(article_text4, tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device(DEVICE)))
 
-model.to("cuda")
+model.to(DEVICE)
 with open(test_data_file, encoding="utf-8") as file:
     line = file.readline()
-    while line:
+    meta = {
+        'wandb': 'https://app.wandb.ai/neonbjb/nonint-transformers-torch/runs/0jw3yvln?workspace=user-neonbjb',
+        'description': '256-seq model with target prepended in a 32-character fixed buffer. batch size 4.'
+    }
+    results = []
+    i = 0
+    while line and i < 50:
         processed = process_csv_line(line)
         if processed is not None:
             print("Input text: " + processed["content"])
-            print(test_model(processed['content'], tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device("cuda")))
+            output = test_model(processed['content'], tokenizer, model, CHUNK_SEQ_LEN, TITLE_PRED_MAX_LEN, torch.device(DEVICE))
+            print(output)
             print("Actual title: " + processed['title'])
             print("\n\n")
+
+            result = {}
+            result["input"] = processed["content"]
+            result["target"] = processed["title"]
+            result["prediction"] = output
+            results.append(result)
         line = file.readline()
+        i += 1
+
+    output_json = {'meta': meta, 'results': results}
+    with open(output_dir + "/gen_results.json", "w") as result_file:
+        json.dump(output_json, result_file, sort_keys=True, indent=4)

@@ -29,6 +29,8 @@ class ChunkedTextDataset(Dataset):
     # max_gen_len=A fixed upper cap for the sequence length of the generated text.
     # mask_target_percentage=The proportion of target tokens to mask.
     # mask_all_percentage=The proportion of <all> tokens to mask.
+    # force_max_len_gen=If true, target text will be padded to <max_gen_len> in every input sequence and token type IDs
+    #                   will be generated.
     # pad_left=Whether the padding should go on the left or the right.
     def __init__(
         self,
@@ -38,6 +40,7 @@ class ChunkedTextDataset(Dataset):
         max_gen_len=64,
         mask_target_percentage=0.3,
         mask_all_percentage=.1,
+        force_max_len_gen=False,
         pad_left=False,
     ):
         self.tokenizer = tokenizer
@@ -46,6 +49,7 @@ class ChunkedTextDataset(Dataset):
         self.mask_target_percentage = mask_target_percentage
         self.mask_all_percentage = mask_all_percentage
         self.pad_left = pad_left
+        self.force_max_len_gen = force_max_len_gen
 
         self.raw_data = torch.load(data_file)
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
@@ -67,6 +71,11 @@ class ChunkedTextDataset(Dataset):
             target_len = target.shape[0]
             if target_len > self.max_gen_len:
                 target = target[: self.max_gen_len]
+                target_len = self.max_gen_len
+            elif target_len < self.max_gen_len and self.force_max_len_gen:
+                masks_to_fill_target = self.max_gen_len - target_len
+                masks_tensor = torch.full((masks_to_fill_target,), self.tokenizer.pad_token_id, dtype=torch.long)
+                target = torch.cat([target, masks_tensor])
                 target_len = self.max_gen_len
 
             # Create attention_masks that'll go along with this tokenized text.
@@ -117,6 +126,9 @@ class ChunkedTextDataset(Dataset):
             input_ids_masked = []
             attention_mask = []
             labels = []
+            token_type_ids = None
+            if self.force_max_len_gen:
+                token_type_ids = []
             for c_text, c_att, c_lab in zip(
                 chunked_text, chunked_attention, chunked_labels
             ):
@@ -172,12 +184,22 @@ class ChunkedTextDataset(Dataset):
                 input_ids_masked.append(c_text_masked)
                 labels.append(c_lab_full)
 
-            return {
+                if self.force_max_len_gen:
+                    token_type_ids.append(torch.cat([
+                        torch.zeros((target_len + 2,), dtype=torch.long),
+                        torch.ones((self.max_chunk_len - target_len - 2,), dtype=torch.long)
+                    ]))
+
+            result = {
                 "input_ids": input_ids,
                 "input_ids_masked": input_ids_masked,
                 "attention_masks": attention_mask,
                 "labels": labels,
             }
+
+            if token_type_ids is not None:
+                result['token_type_ids'] = token_type_ids
+            return result
 
     def perform_mask(self, tensor: torch.Tensor, mask_percentage: float, prefilled_labels=None, truth_values=None) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.tokenizer.mask_token is None:
@@ -319,7 +341,7 @@ class ChunkedTextBatchSampler(Sampler):
 
 def test_against_real_file(test_file, tokenizer):
     batchsz = 16
-    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer)
+    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer, force_max_len_gen=True)
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
     _b_n = 0
