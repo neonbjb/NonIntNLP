@@ -15,6 +15,7 @@ import torch
 # Blocks content that is less than a certain character count, since this dataset has invalid content.
 def process_csv_line(line):
     TITLE_INDEX = 2
+    PUBLICATION_INDEX = 3
     CONTENT_INDEX = 9
     splitted = line.split(",")
 
@@ -27,7 +28,19 @@ def process_csv_line(line):
     if len(splitted[TITLE_INDEX]) < 30:
         return None
 
-    return {"title": splitted[TITLE_INDEX], "content": rejoined_content}
+    # The publication name often appears in the title. Remove it.
+    publication_name = splitted[PUBLICATION_INDEX]
+    # Dataset specific hack:
+    if publication_name == "New York Times":
+        publication_name = "The New York Times"
+    title = splitted[TITLE_INDEX].replace(publication_name, "").strip()
+    # This will often leave a dash prepended or appended. fix that too.
+    if title.startswith("-"):
+        title = title[1:].strip()
+    if title.endswith("-"):
+        title = title[:-1].strip()
+
+    return {"title": title, "content": rejoined_content}
 
 
 # Processes the entire file.
