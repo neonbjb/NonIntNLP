@@ -29,3 +29,5 @@ Python/saved/*
 hs_err_pid*
 
 Java/.idea/*
+
+test.pt
