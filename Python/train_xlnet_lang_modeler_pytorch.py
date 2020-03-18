@@ -31,10 +31,11 @@ def save_model(_model, _chkpt_name):
              'forward': forward_times,
              'backward': backward_times,
              'opt': opt_times}
-    torch.save(times, os.path.join(_output_dir, "processing_times.pt"))
-
     if not os.path.exists(_output_dir):
         os.makedirs(_output_dir)
+
+    torch.save(times, os.path.join(_output_dir, "processing_times.pt"))
+
     _model_to_save = (
         _model.module if hasattr(_model, "module") else _model
     )  # Take care of distributed/parallel training
@@ -85,7 +86,7 @@ def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _max_seq_l
 
             # Backwards
             # Scale loss by the chunk size to give all sequences equal importance.
-            _scaled_loss = _scaled_loss / _num_chunks
+            _scaled_loss = _loss / _num_chunks
             __s = time.time()
             if fp16:
                 with amp.scale_loss(_scaled_loss, _optimizer) as _scaled_loss:
@@ -101,11 +102,11 @@ def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _max_seq_l
                 torch.nn.utils.clip_grad_norm_(amp.master_params(_optimizer), 1)
             else:
                 torch.nn.utils.clip_grad_norm_(_model.parameters(), 1)
-            __s = time.time()
-            _optimizer.step()
-            opt_times.append(time.time() - __s)
-            _scheduler.step()
-            _model.zero_grad()
+        __s = time.time()
+        _optimizer.step()
+        opt_times.append(time.time() - __s)
+        _scheduler.step()
+        _model.zero_grad()
 
         # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
         _tr_loss += _loss.item()
@@ -193,6 +194,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train dataset against.')
     parser.add_argument('--input_folder', type=str, required=True, help='Where to find train.pt and val.pt datasets.')
     parser.add_argument('--device', type=str, default='cuda', help='PyTorch device name to run on.')
+    parser.add_argument('--start_lr', type=float, default=2e-5, help='Learning rate to start at.')
     args = parser.parse_args()
 
     project_name = args.project_name
@@ -204,6 +206,7 @@ if __name__ == "__main__":
     model_name = args.model_name
     input_folder = args.input_folder
     torch_device_name = args.device
+    start_lr = args.start_lr
 
     run_name = input("Enter a name for this run..")
 
@@ -233,7 +236,7 @@ if __name__ == "__main__":
     print("*** Loading model.. ***")
     config = transformers.XLNetConfig.from_pretrained(model_name)
     config.mem_len = 1024
-    model = transformers.XLNetLMHeadModel.from_pretrained(model_name, config=config)
+    model = transformers.XLNetLMHeadModel.from_pretrained('C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\xlnet_title_generation\local_title_first_256_after_data_fixes', config=config)
     device = torch.device(torch_device_name)
 
     no_decay = ["bias", "LayerNorm.weight"]
@@ -244,7 +247,7 @@ if __name__ == "__main__":
         },
         {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
-    optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=2e-5, eps=1e-8)
+    optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=start_lr, eps=1e-8)
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer,
                                                              num_warmup_steps=0,
                                                              num_training_steps=epochs * len(train_set) / batch_size)
