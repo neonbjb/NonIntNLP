@@ -4,6 +4,7 @@ import wandb
 import time
 import os
 import argparse
+import json
 
 from chunked_text_dataloader import ChunkedTextDataset
 from tqdm import tqdm
@@ -22,19 +23,24 @@ def clear_timers():
     backward_times.clear()
     opt_times.clear()
 
-def save_model(_model, _chkpt_name):
+def save_model(_model, _chkpt_name, _chunked_model_config):
     # Save the model
     _output_dir = os.path.join("c:/Users/jbetk/Documents/data/ml/saved_models", "xlnet_title_generation", _chkpt_name)
 
-    # Save processing times.
-    times = {'preprocess': preprocess_times,
-             'forward': forward_times,
-             'backward': backward_times,
-             'opt': opt_times}
     if not os.path.exists(_output_dir):
         os.makedirs(_output_dir)
 
-    torch.save(times, os.path.join(_output_dir, "processing_times.pt"))
+    # Save configuration options specific to this run.
+    with open(os.path.join(_output_dir, 'chunk_config.json'), 'w') as _chunk_config_file:
+        json.dump(_chunked_model_config, _chunk_config_file)
+
+    # Save processing times.
+    _times = {'preprocess': preprocess_times,
+             'forward': forward_times,
+             'backward': backward_times,
+             'opt': opt_times}
+    with open(os.path.join(_output_dir, "processing_times.pt"), 'w') as _processing_times_file:
+        json.dump(_times, _processing_times_file)
 
     _model_to_save = (
         _model.module if hasattr(_model, "module") else _model
@@ -43,7 +49,7 @@ def save_model(_model, _chkpt_name):
     print("Save completed. %s" % (_output_dir))
 
 
-def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _max_seq_len, _max_title_len, _fp16):
+def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _chunked_model_config, _fp16):
     _logging_steps = 5
     _steps_till_save = 2000
     _steps_till_validate = 2000
@@ -128,17 +134,17 @@ def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _max_seq_l
             else:
                 print(_logs)
 
-        if _steps != 0 and _steps % _steps_till_save == 0:
-            save_model(model, "chkpt_%i" % (_steps))
-        if _steps != 0 and _steps % _steps_till_validate == 0:
-            validate(_model, _device, _max_seq_len, _max_title_len)
+        if _steps % _steps_till_save == 0:
+            save_model(model, "chkpt_%i" % (_steps), _chunked_model_config)
+        if _steps % _steps_till_validate == 0:
+            validate(_model, _device)
 
         _steps += 1
         # Record time so we see how long it takes to fetch a batch.
         __s = time.time()
 
 
-def validate(_model, _device, _max_seq_len, _max_title_len):
+def validate(_model, _device):
     _epoch_iterator = tqdm(val_loader, desc="Validation Iteration")
     _actual_steps = 0
     _total_loss = 0
@@ -178,11 +184,7 @@ def validate(_model, _device, _max_seq_len, _max_title_len):
 
 
 if __name__ == "__main__":
-    epochs = 1
-    batch_size = 4
-    sequence_length = 256
-    predict_length = 32
-    model_name = "xlnet-base-cased"
+    run_name = input("Enter a name for this run..")
 
     # Process command line flags
     parser = argparse.ArgumentParser(description="Train an auto-regressive transformer model.")
@@ -201,25 +203,33 @@ if __name__ == "__main__":
     args = parser.parse_args()
     epochs = args.epochs
     batch_size = args.batch_sz
-    sequence_length = args.seq_sz
-    predict_length = args.max_predict_sz
-    model_name = args.model_name
     input_folder = args.input_folder
     torch_device_name = args.device
     start_lr = args.start_lr
 
-    run_name = input("Enter a name for this run..")
+    chunked_model_config = {
+        'name': run_name,
+        'max_seq_len': args.seq_sz,
+        'model_name': args.model_name,
+        'predict_len': args.max_predict_sz,
+        'batch_size': batch_size,
+        'starting_lr': start_lr,
+        'target_mask_percent': .5,
+        'text_mask_percentage': .1,
+        'force_max_len_gen': False,
+        'mem_len': 1024
+    }
 
-    tokenizer = transformers.XLNetTokenizer.from_pretrained(model_name)
+    tokenizer = transformers.XLNetTokenizer.from_pretrained(chunked_model_config['model_name'])
 
     # Get the datasets
     print("*** Loading data.. ***")
-    train_set = ChunkedTextDataset(os.path.join(input_folder, "train.pt"), tokenizer, sequence_length, predict_length,
-                                   mask_target_percentage=.5,
-                                   pad_left=True, force_max_len_gen=False)
-    val_set = ChunkedTextDataset(os.path.join(input_folder, "val.pt"), tokenizer, sequence_length, predict_length,
-                                 mask_target_percentage=.5,
-                                 pad_left=True, force_max_len_gen=False)
+    train_set = ChunkedTextDataset(os.path.join(input_folder, "train.pt"), tokenizer, chunked_model_config['max_seq_len'], chunked_model_config['predict_len'],
+                                   mask_target_percentage=chunked_model_config['target_mask_percent'], mask_all_percentage=chunked_model_config['text_mask_percentage'],
+                                   pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'])
+    val_set = ChunkedTextDataset(os.path.join(input_folder, "val.pt"), tokenizer, chunked_model_config['max_seq_len'], chunked_model_config['predict_len'],
+                                   mask_target_percentage=chunked_model_config['target_mask_percent'], mask_all_percentage=chunked_model_config['text_mask_percentage'],
+                                   pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'])
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
 
@@ -227,16 +237,16 @@ if __name__ == "__main__":
     do_wandb = True
     if do_wandb:
         wandb.init(project=project_name, \
-                   name=run_name)
+                   name=run_name, config=chunked_model_config)
         # There's something bugged about this, but it doesnt really seem to do much anyways. Apparently it enables some
         # sort of gradient exploration map.
         # wandb.watch(model)
 
     # Load model
     print("*** Loading model.. ***")
-    config = transformers.XLNetConfig.from_pretrained(model_name)
-    config.mem_len = 1024
-    model = transformers.XLNetLMHeadModel.from_pretrained('C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\xlnet_title_generation\local_title_first_256_after_data_fixes', config=config)
+    config = transformers.XLNetConfig.from_pretrained(chunked_model_config['model_name'])
+    config.mem_len = chunked_model_config['mem_len']
+    model = transformers.XLNetLMHeadModel.from_pretrained(chunked_model_config['model_name'], config=config)
     device = torch.device(torch_device_name)
 
     no_decay = ["bias", "LayerNorm.weight"]
@@ -250,7 +260,9 @@ if __name__ == "__main__":
     optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=start_lr, eps=1e-8)
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer,
                                                              num_warmup_steps=0,
-                                                             num_training_steps=epochs * len(train_set) / batch_size)
+                                                             # '5' a tad bit higher than the average number of chunks,
+                                                             #  each of which will get a train step.
+                                                             num_training_steps=epochs * len(train_set) * 5 / batch_size)
 
     # Shift model to device & enable fp16 if applicable.
     model.to(device)
@@ -260,9 +272,9 @@ if __name__ == "__main__":
     print("*** Running training ***")
     model.zero_grad()
     for _ in range(epochs):
-        train_epoch(model, optimizer, scheduler, device, train_loader, sequence_length, predict_length, fp16)
+        train_epoch(model, optimizer, scheduler, device, train_loader, chunked_model_config, fp16)
         # Slowly increase the mask percentage per epoch to make the model have to work harder.
         train_set.mask_target_percentage += .1
 
-    validate(model, device, sequence_length, predict_length)
-    save_model(model, "final")
+    validate(model, device)
+    save_model(model, "final", chunked_model_config)
