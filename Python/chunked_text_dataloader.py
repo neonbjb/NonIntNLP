@@ -28,6 +28,7 @@ class ChunkedTextDataset(Dataset):
     # max_chunk_len=Sequence size per chunk. This minus `max_gen_len` is the space left for the actual text.
     # max_gen_len=A fixed upper cap for the sequence length of the generated text.
     # mask_target_percentage=The proportion of target tokens to mask.
+    # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
     # mask_all_percentage=The proportion of <all> tokens to mask.
     # force_max_len_gen=If true, target text will be padded to <max_gen_len> in every input sequence and token type IDs
     #                   will be generated.
@@ -39,6 +40,7 @@ class ChunkedTextDataset(Dataset):
         max_chunk_len=192,
         max_gen_len=64,
         mask_target_percentage=0.3,
+        target_mask_cluster_count=1,
         mask_all_percentage=.1,
         force_max_len_gen=False,
         pad_left=False,
@@ -50,7 +52,7 @@ class ChunkedTextDataset(Dataset):
         self.mask_all_percentage = mask_all_percentage
         self.pad_left = pad_left
         self.force_max_len_gen = force_max_len_gen
-
+        self.target_mask_cluster_count = target_mask_cluster_count
         self.raw_data = torch.load(data_file)
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
 
@@ -119,7 +121,7 @@ class ChunkedTextDataset(Dataset):
 
             # Perform masking on the target if needed.
             target_masked = target.clone().detach()
-            target_masked, label_append = self.perform_mask(target_masked, self.mask_target_percentage)
+            target_masked, label_append = self.perform_mask(target_masked, self.mask_target_percentage, cluster_mask_count=self.target_mask_cluster_count)
 
             # Now append the labels (and masks) per chunk
             input_ids = []
@@ -201,7 +203,7 @@ class ChunkedTextDataset(Dataset):
                 result['token_type_ids'] = token_type_ids
             return result
 
-    def perform_mask(self, tensor: torch.Tensor, mask_percentage: float, prefilled_labels=None, truth_values=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def perform_mask(self, tensor: torch.Tensor, mask_percentage: float, prefilled_labels=None, truth_values=None, cluster_mask_count=1) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.tokenizer.mask_token is None:
             raise ValueError(
                 "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
@@ -222,6 +224,20 @@ class ChunkedTextDataset(Dataset):
             padding_mask = labels.eq(self.tokenizer.pad_token_id)
             probability_matrix.masked_fill_(padding_mask, value=0.0)
         masked_indices = torch.bernoulli(probability_matrix).bool()
+
+        # cluster_mask_count works thusly:
+        # If it is specified and a value > 1, then wherever we are going to mask the input, we also mask the next
+        # <cluster_mask_count> input elements as well. Note that this will indiscriminately mask pads and special
+        # tokens, and that should be OK.
+        if cluster_mask_count > 1:
+            cluster_decay = 0
+            for i in range(masked_indices.shape[-1]):
+                if masked_indices[i]:
+                    cluster_decay = cluster_mask_count
+                if cluster_decay > 0:
+                    cluster_decay -= 1
+                    masked_indices[i] = True
+
         if prefilled_labels is None:
             labels[~masked_indices] = -100  # We only compute loss on masked tokens
         else:
@@ -341,7 +357,7 @@ class ChunkedTextBatchSampler(Sampler):
 
 def test_against_real_file(test_file, tokenizer):
     batchsz = 16
-    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer, force_max_len_gen=True)
+    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer, target_mask_cluster_count=3)
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
     _b_n = 0

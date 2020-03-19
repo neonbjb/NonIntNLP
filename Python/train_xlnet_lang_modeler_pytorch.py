@@ -214,7 +214,8 @@ if __name__ == "__main__":
         'predict_len': args.max_predict_sz,
         'batch_size': batch_size,
         'starting_lr': start_lr,
-        'target_mask_percent': .5,
+        'target_mask_percent': .3,
+        'target_mask_cluster_count': 4,
         'text_mask_percentage': .1,
         'force_max_len_gen': False,
         'mem_len': 1024
@@ -226,7 +227,7 @@ if __name__ == "__main__":
     print("*** Loading data.. ***")
     train_set = ChunkedTextDataset(os.path.join(input_folder, "train.pt"), tokenizer, chunked_model_config['max_seq_len'], chunked_model_config['predict_len'],
                                    mask_target_percentage=chunked_model_config['target_mask_percent'], mask_all_percentage=chunked_model_config['text_mask_percentage'],
-                                   pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'])
+                                   pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'], target_mask_cluster_count=chunked_model_config['target_mask_cluster_count'])
     val_set = ChunkedTextDataset(os.path.join(input_folder, "val.pt"), tokenizer, chunked_model_config['max_seq_len'], chunked_model_config['predict_len'],
                                    mask_target_percentage=chunked_model_config['target_mask_percent'], mask_all_percentage=chunked_model_config['text_mask_percentage'],
                                    pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'])
