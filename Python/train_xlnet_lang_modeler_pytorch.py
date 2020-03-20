@@ -18,28 +18,40 @@ forward_times = []
 backward_times = []
 opt_times = []
 
+
 def clear_timers():
     forward_times.clear()
     backward_times.clear()
     opt_times.clear()
 
+
 def save_model(_model, _chkpt_name, _chunked_model_config):
     # Save the model
-    _output_dir = os.path.join("c:/Users/jbetk/Documents/data/ml/saved_models", "xlnet_title_generation", _chkpt_name)
+    _output_dir = os.path.join(
+        "c:/Users/jbetk/Documents/data/ml/saved_models",
+        "xlnet_title_generation",
+        _chkpt_name,
+    )
 
     if not os.path.exists(_output_dir):
         os.makedirs(_output_dir)
 
     # Save configuration options specific to this run.
-    with open(os.path.join(_output_dir, 'chunk_config.json'), 'w') as _chunk_config_file:
+    with open(
+        os.path.join(_output_dir, "chunk_config.json"), "w"
+    ) as _chunk_config_file:
         json.dump(_chunked_model_config, _chunk_config_file)
 
     # Save processing times.
-    _times = {'preprocess': preprocess_times,
-             'forward': forward_times,
-             'backward': backward_times,
-             'opt': opt_times}
-    with open(os.path.join(_output_dir, "processing_times.pt"), 'w') as _processing_times_file:
+    _times = {
+        "preprocess": preprocess_times,
+        "forward": forward_times,
+        "backward": backward_times,
+        "opt": opt_times,
+    }
+    with open(
+        os.path.join(_output_dir, "processing_times.pt"), "w"
+    ) as _processing_times_file:
         json.dump(_times, _processing_times_file)
 
     _model_to_save = (
@@ -49,7 +61,9 @@ def save_model(_model, _chkpt_name, _chunked_model_config):
     print("Save completed. %s" % (_output_dir))
 
 
-def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _chunked_model_config, _fp16):
+def train_epoch(
+    _model, _optimizer, _scheduler, _device, _dataloader, _chunked_model_config, _fp16
+):
     _logging_steps = 5
     _steps_till_save = 2000
     _steps_till_validate = 2000
@@ -72,17 +86,17 @@ def train_epoch(_model, _optimizer, _scheduler, _device, _dataloader, _chunked_m
         _chunk_loss_schedule = []
         _num_chunks = len(_batch["input_ids"])
         _chunks += _num_chunks
-        for _masked_input_ids, _attention_masks, _labels in zip(_batch['input_ids_masked'],
-                                                                _batch['attention_masks'],
-                                                                _batch['labels']):
+        for _masked_input_ids, _attention_masks, _labels in zip(
+            _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
+        ):
             # Forward
             _inputs = {
-                'input_ids': _masked_input_ids.to(_device),
-                'attention_mask': _attention_masks.to(_device),
-                'labels': _labels.to(_device)
+                "input_ids": _masked_input_ids.to(_device),
+                "attention_mask": _attention_masks.to(_device),
+                "labels": _labels.to(_device),
             }
             if _mems is not None:
-                _inputs['mems'] = _mems
+                _inputs["mems"] = _mems
 
             __s = time.time()
             _loss, _logits, _mems = _model.forward(**_inputs)
@@ -157,17 +171,17 @@ def validate(_model, _device):
                 continue
             _mems = None
             _loss = None
-            for _masked_input_ids, _attention_masks, _labels in zip(_batch['input_ids_masked'],
-                                                                    _batch['attention_masks'],
-                                                                    _batch['labels']):
+            for _masked_input_ids, _attention_masks, _labels in zip(
+                _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
+            ):
                 # Forward
                 _inputs = {
-                    'input_ids': _masked_input_ids.to(_device),
-                    'attention_mask': _attention_masks.to(_device),
-                    'labels': _labels.to(_device)
+                    "input_ids": _masked_input_ids.to(_device),
+                    "attention_mask": _attention_masks.to(_device),
+                    "labels": _labels.to(_device),
                 }
                 if _mems is not None:
-                    _inputs['mems'] = _mems
+                    _inputs["mems"] = _mems
 
                 _loss, _logits, _mems = _model.forward(**_inputs)
 
@@ -187,16 +201,49 @@ if __name__ == "__main__":
     run_name = input("Enter a name for this run..")
 
     # Process command line flags
-    parser = argparse.ArgumentParser(description="Train an auto-regressive transformer model.")
-    parser.add_argument('--project_name', type=str, default='nonint-transformers-torch', help='Project name for wandb')
-    parser.add_argument('--batch_sz', type=int, default=4, help='Batch size')
-    parser.add_argument('--seq_sz', type=int, default=256, help='Sequence size to be fed into the model')
-    parser.add_argument('--max_predict_sz', type=int, default=32, help='Max sequence size of the predicted sequence')
-    parser.add_argument('--model_name', type=str, default='xlnet-base-cased', help='Transformers pre-trained model to start with')
-    parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train dataset against.')
-    parser.add_argument('--input_folder', type=str, required=True, help='Where to find train.pt and val.pt datasets.')
-    parser.add_argument('--device', type=str, default='cuda', help='PyTorch device name to run on.')
-    parser.add_argument('--start_lr', type=float, default=2e-5, help='Learning rate to start at.')
+    parser = argparse.ArgumentParser(
+        description="Train an auto-regressive transformer model."
+    )
+    parser.add_argument(
+        "--project_name",
+        type=str,
+        default="nonint-transformers-torch",
+        help="Project name for wandb",
+    )
+    parser.add_argument("--batch_sz", type=int, default=4, help="Batch size")
+    parser.add_argument(
+        "--seq_sz", type=int, default=256, help="Sequence size to be fed into the model"
+    )
+    parser.add_argument(
+        "--max_predict_sz",
+        type=int,
+        default=32,
+        help="Max sequence size of the predicted sequence",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="xlnet-base-cased",
+        help="Transformers pre-trained model to start with",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=1,
+        help="Number of epochs to train dataset against.",
+    )
+    parser.add_argument(
+        "--input_folder",
+        type=str,
+        required=True,
+        help="Where to find train.pt and val.pt datasets.",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda", help="PyTorch device name to run on."
+    )
+    parser.add_argument(
+        "--start_lr", type=float, default=2e-5, help="Learning rate to start at."
+    )
     args = parser.parse_args()
 
     project_name = args.project_name
@@ -208,62 +255,96 @@ if __name__ == "__main__":
     start_lr = args.start_lr
 
     chunked_model_config = {
-        'name': run_name,
-        'max_seq_len': args.seq_sz,
-        'model_name': args.model_name,
-        'predict_len': args.max_predict_sz,
-        'batch_size': batch_size,
-        'starting_lr': start_lr,
-        'target_mask_percent': .3,
-        'target_mask_cluster_count': 4,
-        'text_mask_percentage': .1,
-        'force_max_len_gen': False,
-        'mem_len': 1024
+        "name": run_name,
+        "max_seq_len": args.seq_sz,
+        "model_name": args.model_name,
+        "predict_len": args.max_predict_sz,
+        "batch_size": batch_size,
+        "starting_lr": start_lr,
+        "target_mask_percent": 0.3,
+        "target_mask_cluster_count": 2,
+        "text_mask_percentage": 0.1,
+        "force_max_len_gen": False,
+        "mem_len": 1024,
     }
 
-    tokenizer = transformers.XLNetTokenizer.from_pretrained(chunked_model_config['model_name'])
+    tokenizer = transformers.XLNetTokenizer.from_pretrained(
+        chunked_model_config["model_name"]
+    )
 
     # Get the datasets
     print("*** Loading data.. ***")
-    train_set = ChunkedTextDataset(os.path.join(input_folder, "train.pt"), tokenizer, chunked_model_config['max_seq_len'], chunked_model_config['predict_len'],
-                                   mask_target_percentage=chunked_model_config['target_mask_percent'], mask_all_percentage=chunked_model_config['text_mask_percentage'],
-                                   pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'], target_mask_cluster_count=chunked_model_config['target_mask_cluster_count'])
-    val_set = ChunkedTextDataset(os.path.join(input_folder, "val.pt"), tokenizer, chunked_model_config['max_seq_len'], chunked_model_config['predict_len'],
-                                   mask_target_percentage=chunked_model_config['target_mask_percent'], mask_all_percentage=chunked_model_config['text_mask_percentage'],
-                                   pad_left=True, force_max_len_gen=chunked_model_config['force_max_len_gen'])
+    train_set = ChunkedTextDataset(
+        os.path.join(input_folder, "train.pt"),
+        tokenizer,
+        chunked_model_config["max_seq_len"],
+        chunked_model_config["predict_len"],
+        mask_target_percentage=chunked_model_config["target_mask_percent"],
+        mask_all_percentage=chunked_model_config["text_mask_percentage"],
+        pad_left=True,
+        force_max_len_gen=chunked_model_config["force_max_len_gen"],
+        target_mask_cluster_count=chunked_model_config["target_mask_cluster_count"],
+        cluster_easing=True,
+    )
+    val_set = ChunkedTextDataset(
+        os.path.join(input_folder, "val.pt"),
+        tokenizer,
+        chunked_model_config["max_seq_len"],
+        chunked_model_config["predict_len"],
+        mask_target_percentage=chunked_model_config["target_mask_percent"],
+        mask_all_percentage=chunked_model_config["text_mask_percentage"],
+        pad_left=True,
+        force_max_len_gen=chunked_model_config["force_max_len_gen"],
+    )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
 
     # Initialize w&b logger
     do_wandb = True
     if do_wandb:
-        wandb.init(project=project_name, \
-                   name=run_name, config=chunked_model_config)
+        wandb.init(project=project_name, name=run_name, config=chunked_model_config)
         # There's something bugged about this, but it doesnt really seem to do much anyways. Apparently it enables some
         # sort of gradient exploration map.
         # wandb.watch(model)
 
     # Load model
     print("*** Loading model.. ***")
-    config = transformers.XLNetConfig.from_pretrained(chunked_model_config['model_name'])
-    config.mem_len = chunked_model_config['mem_len']
-    model = transformers.XLNetLMHeadModel.from_pretrained(chunked_model_config['model_name'], config=config)
+    config = transformers.XLNetConfig.from_pretrained(
+        chunked_model_config["model_name"]
+    )
+    config.mem_len = chunked_model_config["mem_len"]
+    model = transformers.XLNetLMHeadModel.from_pretrained(
+        chunked_model_config["model_name"], config=config
+    )
     device = torch.device(torch_device_name)
 
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay)
+            ],
             "weight_decay": 0,
         },
-        {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+        {
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)
+            ],
+            "weight_decay": 0.0,
+        },
     ]
     optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=start_lr, eps=1e-8)
-    scheduler = transformers.get_linear_schedule_with_warmup(optimizer,
-                                                             num_warmup_steps=0,
-                                                             # '5' a tad bit higher than the average number of chunks,
-                                                             #  each of which will get a train step.
-                                                             num_training_steps=epochs * len(train_set) * 5 / batch_size)
+    scheduler = transformers.get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=0,
+        # '5' a tad bit higher than the average number of chunks,
+        #  each of which will get a train step.
+        num_training_steps=epochs * len(train_set) * 5 / batch_size,
+    )
 
     # Shift model to device & enable fp16 if applicable.
     model.to(device)
@@ -273,9 +354,17 @@ if __name__ == "__main__":
     print("*** Running training ***")
     model.zero_grad()
     for _ in range(epochs):
-        train_epoch(model, optimizer, scheduler, device, train_loader, chunked_model_config, fp16)
+        train_epoch(
+            model,
+            optimizer,
+            scheduler,
+            device,
+            train_loader,
+            chunked_model_config,
+            fp16,
+        )
         # Slowly increase the mask percentage per epoch to make the model have to work harder.
-        train_set.mask_target_percentage += .1
+        train_set.mask_target_percentage += 0.1
 
     validate(model, device)
     save_model(model, "final", chunked_model_config)

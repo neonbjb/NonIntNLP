@@ -28,11 +28,12 @@ class ChunkedTextDataset(Dataset):
     # max_chunk_len=Sequence size per chunk. This minus `max_gen_len` is the space left for the actual text.
     # max_gen_len=A fixed upper cap for the sequence length of the generated text.
     # mask_target_percentage=The proportion of target tokens to mask.
-    # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
     # mask_all_percentage=The proportion of <all> tokens to mask.
     # force_max_len_gen=If true, target text will be padded to <max_gen_len> in every input sequence and token type IDs
     #                   will be generated.
     # pad_left=Whether the padding should go on the left or the right.
+    # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
+    # cluster_easing=When enabled, target_mask_cluster_count will approach max_gen_len as the dataset is iterated over.
     def __init__(
         self,
         data_file: str,
@@ -40,10 +41,11 @@ class ChunkedTextDataset(Dataset):
         max_chunk_len=192,
         max_gen_len=64,
         mask_target_percentage=0.3,
-        target_mask_cluster_count=1,
-        mask_all_percentage=.1,
+        mask_all_percentage=0.1,
         force_max_len_gen=False,
         pad_left=False,
+        target_mask_cluster_count=1,
+        cluster_easing=False,
     ):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
@@ -52,9 +54,15 @@ class ChunkedTextDataset(Dataset):
         self.mask_all_percentage = mask_all_percentage
         self.pad_left = pad_left
         self.force_max_len_gen = force_max_len_gen
-        self.target_mask_cluster_count = target_mask_cluster_count
         self.raw_data = torch.load(data_file)
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
+        self.target_mask_cluster_count = target_mask_cluster_count
+        self.cluster_easing = cluster_easing
+
+        # State variables for cluster easing.
+        self.cluster_easing_current = self.target_mask_cluster_count
+        cluster_easing_interval = self.max_gen_len - self.cluster_easing_current
+        self.cluster_easing_inc = cluster_easing_interval / len(self.raw_data)
 
         # Each chunk will get a BOS, CLS and EOS token added to it.
         self.special_tokens_per_chunk = 3
@@ -64,7 +72,9 @@ class ChunkedTextDataset(Dataset):
         bos_token_tensor = torch.tensor([self.tokenizer.bos_token_id], dtype=torch.long)
         eos_token_tensor = torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)
         sep_token_tensor = torch.tensor([self.tokenizer.sep_token_id], dtype=torch.long)
-        mask_token_tensor = torch.tensor([self.tokenizer.mask_token_id], dtype=torch.long)
+        mask_token_tensor = torch.tensor(
+            [self.tokenizer.mask_token_id], dtype=torch.long
+        )
         zero_token_tensor = torch.tensor([0], dtype=torch.long)
         one_token_float_tensor = torch.tensor([1], dtype=torch.float)
         one_token_tensor = torch.tensor([1], dtype=torch.long)
@@ -76,7 +86,11 @@ class ChunkedTextDataset(Dataset):
                 target_len = self.max_gen_len
             elif target_len < self.max_gen_len and self.force_max_len_gen:
                 masks_to_fill_target = self.max_gen_len - target_len
-                masks_tensor = torch.full((masks_to_fill_target,), self.tokenizer.pad_token_id, dtype=torch.long)
+                masks_tensor = torch.full(
+                    (masks_to_fill_target,),
+                    self.tokenizer.pad_token_id,
+                    dtype=torch.long,
+                )
                 target = torch.cat([target, masks_tensor])
                 target_len = self.max_gen_len
 
@@ -121,7 +135,16 @@ class ChunkedTextDataset(Dataset):
 
             # Perform masking on the target if needed.
             target_masked = target.clone().detach()
-            target_masked, label_append = self.perform_mask(target_masked, self.mask_target_percentage, cluster_mask_count=self.target_mask_cluster_count)
+            if self.cluster_easing:
+                cluster_count = int(self.cluster_easing_current)
+                self.cluster_easing_current += self.cluster_easing_inc
+            else:
+                cluster_count = self.target_mask_cluster_count
+            target_masked, label_append = self.perform_mask(
+                target_masked,
+                self.mask_target_percentage,
+                cluster_mask_count=cluster_count,
+            )
 
             # Now append the labels (and masks) per chunk
             input_ids = []
@@ -144,7 +167,7 @@ class ChunkedTextDataset(Dataset):
                             target,
                             sep_token_tensor,
                             c_text,
-                            eos_token_tensor
+                            eos_token_tensor,
                         ],
                         dim=0,
                     )
@@ -166,7 +189,7 @@ class ChunkedTextDataset(Dataset):
                         target_masked,
                         mask_token_tensor,  # Always mask the [SEP] tokens - let the model guess where they are.
                         c_text,
-                        eos_token_tensor
+                        eos_token_tensor,
                     ],
                     dim=0,
                 )
@@ -176,21 +199,30 @@ class ChunkedTextDataset(Dataset):
                         label_append,
                         sep_token_tensor,
                         c_lab,
-                        n100_token_tensor
+                        n100_token_tensor,
                     ],
                     dim=0,
                 )
 
                 # Now we just have to perform full masking.
-                c_text_masked, c_lab_full = self.perform_mask(c_text_masked, self.mask_all_percentage, c_lab_full, input_ids[-1])
+                c_text_masked, c_lab_full = self.perform_mask(
+                    c_text_masked, self.mask_all_percentage, c_lab_full, input_ids[-1]
+                )
                 input_ids_masked.append(c_text_masked)
                 labels.append(c_lab_full)
 
                 if self.force_max_len_gen:
-                    token_type_ids.append(torch.cat([
-                        torch.zeros((target_len + 2,), dtype=torch.long),
-                        torch.ones((self.max_chunk_len - target_len - 2,), dtype=torch.long)
-                    ]))
+                    token_type_ids.append(
+                        torch.cat(
+                            [
+                                torch.zeros((target_len + 2,), dtype=torch.long),
+                                torch.ones(
+                                    (self.max_chunk_len - target_len - 2,),
+                                    dtype=torch.long,
+                                ),
+                            ]
+                        )
+                    )
 
             result = {
                 "input_ids": input_ids,
@@ -200,10 +232,17 @@ class ChunkedTextDataset(Dataset):
             }
 
             if token_type_ids is not None:
-                result['token_type_ids'] = token_type_ids
+                result["token_type_ids"] = token_type_ids
             return result
 
-    def perform_mask(self, tensor: torch.Tensor, mask_percentage: float, prefilled_labels=None, truth_values=None, cluster_mask_count=1) -> Tuple[torch.Tensor, torch.Tensor]:
+    def perform_mask(
+        self,
+        tensor: torch.Tensor,
+        mask_percentage: float,
+        prefilled_labels=None,
+        truth_values=None,
+        cluster_mask_count=1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.tokenizer.mask_token is None:
             raise ValueError(
                 "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
@@ -309,7 +348,11 @@ class ChunkedTextDataset(Dataset):
 # will get skipped.
 class ChunkedTextBatchSampler(Sampler):
     def __init__(
-        self, chunked_text_set: ChunkedTextDataset, batch_sz: int, drop_last=True, random=True
+        self,
+        chunked_text_set: ChunkedTextDataset,
+        batch_sz: int,
+        drop_last=True,
+        random=True,
     ):
         self.chunked_text_set = chunked_text_set
         self.batch_sz = batch_sz
@@ -322,7 +365,9 @@ class ChunkedTextBatchSampler(Sampler):
 
         if self.random:
             # minus batch_sz because we don't want to start from any element we cannot finish from.
-            permutation = np.random.permutation(len(self.chunked_text_set) - self.batch_sz)
+            permutation = np.random.permutation(
+                len(self.chunked_text_set) - self.batch_sz
+            )
             yielded = 0
             for pidx in permutation:
                 if yielded == len(self):
@@ -338,7 +383,7 @@ class ChunkedTextBatchSampler(Sampler):
                     yield batch
 
         else:
-           for idx in range(len(self.chunked_text_set)):
+            for idx in range(len(self.chunked_text_set)):
                 chunk_sz_idx = self.chunked_text_set.num_chunks_for_index(idx)
                 if chunk_sz_idx != batch_chunk_sz:
                     batch.clear()
@@ -357,7 +402,9 @@ class ChunkedTextBatchSampler(Sampler):
 
 def test_against_real_file(test_file, tokenizer):
     batchsz = 16
-    dataset = ChunkedTextDataset(data_file=test_file, tokenizer=tokenizer, target_mask_cluster_count=3)
+    dataset = ChunkedTextDataset(
+        data_file=test_file, tokenizer=tokenizer, target_mask_cluster_count=3
+    )
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
     _b_n = 0
@@ -379,9 +426,9 @@ def test_against_real_file(test_file, tokenizer):
         for c in range(chk_sz):
             print("chunk %i" % (c))
             for b in range(batchsz):
-                if random.uniform(0,1) < .9:
+                if random.uniform(0, 1) < 0.9:
                     # Just skip most of these. We only need a few of them for testing.
-                    continue;
+                    continue
                 print("batch element %i" % (b))
                 ii = batch["input_ids"][c][b].tolist()
                 iim = batch["input_ids_masked"][c][b].tolist()
@@ -457,7 +504,7 @@ def test_against_test_set(tokenizer):
         for c in range(chk_sz):
             inputs = batch["input_ids"][c][0].tolist()
             target_tok_count = inputs.index(tokenizer.sep_token_id)
-            text_tens = tokenizer.decode(inputs[target_tok_count+1:])
+            text_tens = tokenizer.decode(inputs[target_tok_count + 1 :])
             text_tens = text_tens.replace(tokenizer.pad_token, "")
             text_tens = text_tens.replace(tokenizer.eos_token, "")
             compiled_text += text_tens
