@@ -3,6 +3,10 @@ import glob, os
 from multiprocessing import Pool
 import random
 import torch
+import csv
+import sys
+
+csv.field_size_limit(sys.maxsize)
 
 # This function processes news articles gathered from this Kaggle dataset:
 # https://www.kaggle.com/snapcrack/all-the-news/data
@@ -15,32 +19,36 @@ import torch
 # Blocks content that is less than a certain character count, since this dataset has invalid content.
 def process_csv_line(line):
     TITLE_INDEX = 2
-    PUBLICATION_INDEX = 3
+    PUBLICATION_NAME = 3
     CONTENT_INDEX = 9
-    splitted = line.split(",")
+    element = next(csv.reader([line]))
 
-    # Once the "content" line begins, any number of commas can appear before the newline which must not be parsed.
-    rejoined_content = ",".join(splitted[CONTENT_INDEX:-1])
+    # This dataset honestly kind of sucks. There are a ton of invalid lines.
+    if len(element) != 10:
+        return None
+
+    text = element[CONTENT_INDEX]
+    pub_name = element[PUBLICATION_NAME]
+    title = element[TITLE_INDEX]
 
     # Don't accept content with too small of text content or title content. Often these are very bad examples.
-    if len(rejoined_content) < 1024:
+    if len(text) < 1024:
         return None
-    if len(splitted[TITLE_INDEX]) < 30:
+    if len(title) < 30:
         return None
 
     # The publication name often appears in the title. Remove it.
-    publication_name = splitted[PUBLICATION_INDEX]
     # Dataset specific hack:
-    if publication_name == "New York Times":
-        publication_name = "The New York Times"
-    title = splitted[TITLE_INDEX].replace(publication_name, "").strip()
+    if pub_name == "New York Times":
+        pub_name = "The New York Times"
+    title = title.replace(pub_name, "").strip()
     # This will often leave a dash prepended or appended. fix that too.
     if title.startswith("-"):
         title = title[1:].strip()
     if title.endswith("-"):
         title = title[:-1].strip()
 
-    return {"title": title, "content": rejoined_content}
+    return {"title": title, "content": text}
 
 
 # Processes the entire file.
