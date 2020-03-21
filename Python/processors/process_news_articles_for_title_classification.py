@@ -14,7 +14,7 @@ csv.field_size_limit(400000000)
 # Index, ID, Title, Publication, Author, Publication Date, Pub Year, Pub Month, URL, Textual Content
 
 
-# Converts a single line of the CSV file into a map that contains 'title' and 'content'.
+# Converts a single line of the CSV file into a map that contains 'title', 'content'.
 # Blocks content that is less than a certain character count, since this dataset has invalid content.
 def process_csv_line(line):
     TITLE_INDEX = 2
@@ -67,7 +67,9 @@ tok = XLNetTokenizer.from_pretrained("xlnet-base-cased")
 
 # This is a map function for processing reviews. It returns a dict:
 #  { 'text' { input_ids_as_tensor },
-#    'title' { input_ids_as_tensor } }
+#    'title' { input_ids_as_tensor },
+#    'false_title' { input_ids_as_tensor }, <-- A string of text of the same length as title randomly sampled from text.
+#    }
 def map_tokenize_news(processed):
     text = processed["content"]
     text_enc = tok.encode(
@@ -80,11 +82,31 @@ def map_tokenize_news(processed):
         title, add_special_tokens=False, max_length=None, pad_to_max_length=False
     )
 
+    false_start = random.randint(0, len(text) - len(title) - 1)
+    false_title = text[false_start:false_start + len(title)]
+    false_title_enc = tok.encode(
+        false_title, add_special_tokens=False, max_length=None, pad_to_max_length=False
+    )
+
     # Push resultants to a simple list and return it
     return {
         "text": torch.tensor(text_enc, dtype=torch.long),
         "target": torch.tensor(title_enc, dtype=torch.long),
+        "false_target": torch.tensor(false_title_enc, dtype=torch.long),
     }
+
+def corrupt_news(tokenized_news):
+    for news in tokenized_news:
+        decision = random.random()
+        if decision < .5:
+            news["classifier"] = 1.0
+        elif decision >= .5 and decision < .75:
+            news["target"] = news["false_target"]
+            news["classifier"] = 0.0
+        else:
+            news["target"] = tokenized_news[random.randint(0, len(tokenized_news)-1)]["target"]
+            news["classifier"] = 0.0
+        del news["false_target"]
 
 
 if __name__ == "__main__":
@@ -92,7 +114,7 @@ if __name__ == "__main__":
     folder = "C:/Users/jbetk/Documents/data/ml/title_prediction/"
     os.chdir(folder + "all-the-news/")
     files = glob.glob("*.csv")
-    output_folder = "/".join([folder, "outputs"])
+    output_folder = "/".join([folder, "classification_outputs"])
 
     # Basic workflow:
     # process_files individually and compile into a list.
@@ -103,8 +125,11 @@ if __name__ == "__main__":
     for f in files:
         all_texts.extend(process_file(f))
     print("Tokenizing news..")
-    p = Pool(23)
+    p = Pool(20)
     all_news = p.map(map_tokenize_news, all_texts)
+
+    print("Corrupting news and adding classifier..")
+    corrupt_news(all_news)
 
     print("Writing news to output file.")
     random.shuffle(all_news)

@@ -34,6 +34,7 @@ class ChunkedTextDataset(Dataset):
     # pad_left=Whether the padding should go on the left or the right.
     # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
     # cluster_easing=When enabled, target_mask_cluster_count will approach max_gen_len as the dataset is iterated over.
+    # includes_classification=When true, the dataloader will extract a classification token from the data file. This can be used to train critic models.
     def __init__(
         self,
         data_file: str,
@@ -46,6 +47,7 @@ class ChunkedTextDataset(Dataset):
         pad_left=False,
         target_mask_cluster_count=1,
         cluster_easing=False,
+        includes_classification=False,
     ):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
@@ -58,6 +60,7 @@ class ChunkedTextDataset(Dataset):
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
         self.target_mask_cluster_count = target_mask_cluster_count
         self.cluster_easing = cluster_easing
+        self.includes_classification = includes_classification
 
         # State variables for cluster easing.
         self.cluster_easing_current = self.target_mask_cluster_count
@@ -67,7 +70,7 @@ class ChunkedTextDataset(Dataset):
         # Each chunk will get a BOS, CLS and EOS token added to it.
         self.special_tokens_per_chunk = 3
 
-    def process_element(self, text, target):
+    def process_element(self, text, target, classifier):
         # Tokens represented as 1-hot tensors which will be reused later in this function.
         bos_token_tensor = torch.tensor([self.tokenizer.bos_token_id], dtype=torch.long)
         eos_token_tensor = torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)
@@ -151,9 +154,13 @@ class ChunkedTextDataset(Dataset):
             input_ids_masked = []
             attention_mask = []
             labels = []
+            classifiers = None
             token_type_ids = None
             if self.force_max_len_gen:
                 token_type_ids = []
+            if self.includes_classification:
+                classifiers = []
+                encoded_classifier = torch.tensor(classifier, dtype=torch.float)
             for c_text, c_att, c_lab in zip(
                 chunked_text, chunked_attention, chunked_labels
             ):
@@ -223,6 +230,8 @@ class ChunkedTextDataset(Dataset):
                             ]
                         )
                     )
+                if self.includes_classification:
+                    classifiers.append(encoded_classifier)
 
             result = {
                 "input_ids": input_ids,
@@ -230,9 +239,10 @@ class ChunkedTextDataset(Dataset):
                 "attention_masks": attention_mask,
                 "labels": labels,
             }
-
             if token_type_ids is not None:
                 result["token_type_ids"] = token_type_ids
+            if self.includes_classification:
+                result["classifiers"] = classifiers
             return result
 
     def perform_mask(
@@ -323,8 +333,11 @@ class ChunkedTextDataset(Dataset):
     # 'input_ids_masked'  Same as 'input_ids', except parts are masked randomly.
     # 'labels':           A list of either (a) masked tokens or (b) -100 for auto-regressive LM loss calculation.
     def __getitem__(self, index):
+        classifier = None
+        if self.includes_classification:
+            classifier = self.raw_data[index]["classifier"]
         return self.process_element(
-            self.raw_data[index]["text"], self.raw_data[index]["target"]
+            self.raw_data[index]["text"], self.raw_data[index]["target"], classifier
         )
 
     def __len__(self):
