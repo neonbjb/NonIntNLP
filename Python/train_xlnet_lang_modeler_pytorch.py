@@ -5,7 +5,6 @@ import time
 import os
 import argparse
 import json
-
 from chunked_text_dataloader import ChunkedTextDataset
 from tqdm import tqdm
 
@@ -13,188 +12,196 @@ fp16 = True
 if fp16:
     from apex import amp
 
-preprocess_times = []
-forward_times = []
-backward_times = []
-opt_times = []
+
+class Trainer:
+    def __init__(self, model, chunked_model_config, train_dataloader, val_dataloader, optimizer, scheduler, device="cuda", is_fp16=False):
+        self.model = model
+        self.chunked_model_config = chunked_model_config
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.device = device
+        self.is_fp16 = is_fp16
+
+        self.preprocess_times = []
+        self.forward_times = []
+        self.backward_times = []
+        self.opt_times = []
+
+    def clear_timers(self):
+        self.forward_times.clear()
+        self.backward_times.clear()
+        self.opt_times.clear()
+
+    def save_model(self, _chkpt_name):
+        # Save the model
+        _output_dir = os.path.join(
+            self.chunked_model_config["output_dir"],
+            "xlnet_trainer_checkpoints",
+            _chkpt_name,
+        )
+
+        if not os.path.exists(_output_dir):
+            os.makedirs(_output_dir)
+
+        # Save configuration options specific to this run.
+        with open(
+            os.path.join(_output_dir, "chunk_config.json"), "w"
+        ) as _chunk_config_file:
+            json.dump(self.chunked_model_config, _chunk_config_file)
+
+        # Save processing times.
+        _times = {
+            "preprocess": self.preprocess_times,
+            "forward": self.forward_times,
+            "backward": self.backward_times,
+            "opt": self.opt_times,
+        }
+        with open(
+            os.path.join(_output_dir, "processing_times.pt"), "w"
+        ) as _processing_times_file:
+            json.dump(_times, _processing_times_file)
+
+        self.model = (
+            self.model if hasattr(self.model, "module") else self.model
+        )  # Take care of distributed/parallel training
+        self.model.save_pretrained(_output_dir)
+        print("Save completed. %s" % (_output_dir))
 
 
-def clear_timers():
-    forward_times.clear()
-    backward_times.clear()
-    opt_times.clear()
+    def train_epoch(self):
+        _logging_steps = 5
+        _steps_till_save = 2000
+        _steps_till_validate = 2000
 
+        self.clear_timers()
 
-def save_model(_model, _chkpt_name, _chunked_model_config):
-    # Save the model
-    _output_dir = os.path.join(
-        "c:/Users/jbetk/Documents/data/ml/saved_models",
-        "xlnet_title_generation",
-        _chkpt_name,
-    )
+        _epoch_iterator = tqdm(self.train_dataloader, desc="Train Iteration")
+        _steps = 0
+        _tr_loss, _logging_loss = 0, 0
+        _chunks = 0
+        _accuracy_accum, _accuracy_last = 0, 0
+        self.model.train()
 
-    if not os.path.exists(_output_dir):
-        os.makedirs(_output_dir)
-
-    # Save configuration options specific to this run.
-    with open(
-        os.path.join(_output_dir, "chunk_config.json"), "w"
-    ) as _chunk_config_file:
-        json.dump(_chunked_model_config, _chunk_config_file)
-
-    # Save processing times.
-    _times = {
-        "preprocess": preprocess_times,
-        "forward": forward_times,
-        "backward": backward_times,
-        "opt": opt_times,
-    }
-    with open(
-        os.path.join(_output_dir, "processing_times.pt"), "w"
-    ) as _processing_times_file:
-        json.dump(_times, _processing_times_file)
-
-    _model_to_save = (
-        _model.module if hasattr(_model, "module") else _model
-    )  # Take care of distributed/parallel training
-    _model_to_save.save_pretrained(_output_dir)
-    print("Save completed. %s" % (_output_dir))
-
-
-def train_epoch(
-    _model, _optimizer, _scheduler, _device, _dataloader, _chunked_model_config, _fp16
-):
-    _logging_steps = 5
-    _steps_till_save = 2000
-    _steps_till_validate = 2000
-
-    clear_timers()
-
-    _epoch_iterator = tqdm(_dataloader, desc="Iteration")
-    _steps = 0
-    _tr_loss, _logging_loss = 0, 0
-    _chunks = 0
-    _accuracy_accum, _accuracy_last = 0, 0
-    _model.train()
-
-    __s = time.time()
-    for _step, _batch in enumerate(_epoch_iterator):
-        preprocess_times.append(time.time() - __s)
-
-        _mems = None
-        _loss = None
-        _chunk_loss_schedule = []
-        _num_chunks = len(_batch["input_ids"])
-        _chunks += _num_chunks
-        for _masked_input_ids, _attention_masks, _labels in zip(
-            _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
-        ):
-            # Forward
-            _inputs = {
-                "input_ids": _masked_input_ids.to(_device),
-                "attention_mask": _attention_masks.to(_device),
-                "labels": _labels.to(_device),
-            }
-            if _mems is not None:
-                _inputs["mems"] = _mems
-
-            __s = time.time()
-            _loss, _logits, _mems = _model.forward(**_inputs)
-            forward_times.append(time.time() - __s)
-
-            _chunk_loss_schedule.append(_loss.item())
-
-            # Backwards
-            # Scale loss by the chunk size to give all sequences equal importance.
-            _scaled_loss = _loss / _num_chunks
-            __s = time.time()
-            if fp16:
-                with amp.scale_loss(_scaled_loss, _optimizer) as _scaled_loss:
-                    _scaled_loss.backward()
-                    backward_time = time.time() - __s
-            else:
-                _scaled_loss.backward()
-                backward_time = time.time() - __s
-            backward_times.append(backward_time)
-
-            # Update weights after all chunks have been processed.
-            if _fp16:
-                torch.nn.utils.clip_grad_norm_(amp.master_params(_optimizer), 1)
-            else:
-                torch.nn.utils.clip_grad_norm_(_model.parameters(), 1)
         __s = time.time()
-        _optimizer.step()
-        opt_times.append(time.time() - __s)
-        _scheduler.step()
-        _model.zero_grad()
-
-        # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
-        _tr_loss += _loss.item()
-
-        if _steps % _logging_steps == 0:
-            _loss_scalar = (_tr_loss - _logging_loss) / _logging_steps
-            _logging_loss = _tr_loss
-            _logs = {}
-            _logs["avg_chunks"] = _chunks / _logging_steps
-            _chunks = 0
-            _logs["loss"] = _loss_scalar
-            _logs["learning_rate"] = _scheduler.get_lr()[0]
-            if do_wandb:
-                # wandb can fail if the network connection goes down. this shouldn't take down training.
-                try:
-                    wandb.log(_logs)
-                except:
-                    print(_logs)
-            else:
-                print(_logs)
-
-        if _steps % _steps_till_save == 0:
-            save_model(model, "chkpt_%i" % (_steps), _chunked_model_config)
-        if _steps % _steps_till_validate == 0:
-            validate(_model, _device)
-
-        _steps += 1
-        # Record time so we see how long it takes to fetch a batch.
-        __s = time.time()
-
-
-def validate(_model, _device):
-    _epoch_iterator = tqdm(val_loader, desc="Validation Iteration")
-    _actual_steps = 0
-    _total_loss = 0
-
-    with torch.no_grad():
         for _step, _batch in enumerate(_epoch_iterator):
-            # Skip 1 in 10 steps, because the validator just takes too long otherwise. It's not as easy as just cutting
-            # down the dataset, either, since we run into chunk/batch size mismatches then.
-            if _step % 10 != 0:
-                continue
+            self.preprocess_times.append(time.time() - __s)
+
             _mems = None
             _loss = None
+            _chunk_loss_schedule = []
+            _num_chunks = len(_batch["input_ids"])
+            _chunks += _num_chunks
             for _masked_input_ids, _attention_masks, _labels in zip(
                 _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
             ):
                 # Forward
                 _inputs = {
-                    "input_ids": _masked_input_ids.to(_device),
-                    "attention_mask": _attention_masks.to(_device),
-                    "labels": _labels.to(_device),
+                    "input_ids": _masked_input_ids.to(self.device),
+                    "attention_mask": _attention_masks.to(self.device),
+                    "labels": _labels.to(self.device),
                 }
                 if _mems is not None:
                     _inputs["mems"] = _mems
 
-                _loss, _logits, _mems = _model.forward(**_inputs)
+                __s = time.time()
+                _loss, _logits, _mems = self.model.forward(**_inputs)
+                self.forward_times.append(time.time() - __s)
+
+                _chunk_loss_schedule.append(_loss.item())
+
+                # Backwards
+                # Scale loss by the chunk size to give all sequences equal importance.
+                _scaled_loss = _loss / _num_chunks
+                __s = time.time()
+                if fp16:
+                    with amp.scale_loss(_scaled_loss, self.optimizer) as _scaled_loss:
+                        _scaled_loss.backward()
+                        backward_time = time.time() - __s
+                else:
+                    _scaled_loss.backward()
+                    backward_time = time.time() - __s
+                self.backward_times.append(backward_time)
+
+                # Update weights after all chunks have been processed.
+                if self.is_fp16:
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1)
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
+            __s = time.time()
+            self.optimizer.step()
+            self.opt_times.append(time.time() - __s)
+            self.scheduler.step()
+            self.model.zero_grad()
 
             # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
-            _actual_steps += 1
-            _total_loss += _loss.item()
+            _tr_loss += _loss.item()
 
-        _logs = {}
-        _val_loss = _total_loss / _actual_steps
-        _logs["val_loss"] = _val_loss
-        if do_wandb:
-            wandb.log(_logs)
-        print("Validation loss: " + str(_val_loss))
+            if _steps % _logging_steps == 0:
+                _loss_scalar = (_tr_loss - _logging_loss) / _logging_steps
+                _logging_loss = _tr_loss
+                _logs = {}
+                _logs["avg_chunks"] = _chunks / _logging_steps
+                _chunks = 0
+                _logs["loss"] = _loss_scalar
+                _logs["learning_rate"] = self.scheduler.get_lr()[0]
+                if do_wandb:
+                    # wandb can fail if the network connection goes down. this shouldn't take down training.
+                    try:
+                        wandb.log(_logs)
+                    except:
+                        print(_logs)
+                else:
+                    print(_logs)
+
+            if _steps % _steps_till_save == 0:
+                self.save_model("chkpt_%i" % (_steps))
+            if _steps % _steps_till_validate == 0:
+                self.validate()
+
+            _steps += 1
+            # Record time so we see how long it takes to fetch a batch.
+            __s = time.time()
+
+
+    def validate(self):
+        _epoch_iterator = tqdm(self.val_dataloader, desc="Validation Iteration")
+        _actual_steps = 0
+        _total_loss = 0
+
+        with torch.no_grad():
+            for _step, _batch in enumerate(_epoch_iterator):
+                # Skip 1 in 10 steps, because the validator just takes too long otherwise. It's not as easy as just cutting
+                # down the dataset, either, since we run into chunk/batch size mismatches then.
+                if _step % 10 != 0:
+                    continue
+                _mems = None
+                _loss = None
+                for _masked_input_ids, _attention_masks, _labels in zip(
+                    _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
+                ):
+                    # Forward
+                    _inputs = {
+                        "input_ids": _masked_input_ids.to(self.device),
+                        "attention_mask": _attention_masks.to(self.device),
+                        "labels": _labels.to(self.device),
+                    }
+                    if _mems is not None:
+                        _inputs["mems"] = _mems
+
+                    _loss, _logits, _mems = self.model.forward(**_inputs)
+
+                # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
+                _actual_steps += 1
+                _total_loss += _loss.item()
+
+            _logs = {}
+            _val_loss = _total_loss / _actual_steps
+            _logs["val_loss"] = _val_loss
+            if do_wandb:
+                wandb.log(_logs)
+            print("Validation loss: " + str(_val_loss))
 
 
 if __name__ == "__main__":
@@ -244,6 +251,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--start_lr", type=float, default=2e-5, help="Learning rate to start at."
     )
+    parser.add_argument(
+        "--output_dir", type=str default=".", help="Directory where checkpoints saves will be made."
+    )
     args = parser.parse_args()
 
     project_name = args.project_name
@@ -261,8 +271,9 @@ if __name__ == "__main__":
         "predict_len": args.max_predict_sz,
         "batch_size": batch_size,
         "starting_lr": start_lr,
+        "output_dir": args.output_dir,
         "target_mask_percent": 0.3,
-        "target_mask_cluster_count": 2,
+        "target_mask_cluster_count": 3,
         "text_mask_percentage": 0.1,
         "force_max_len_gen": False,
         "mem_len": 1024,
@@ -284,7 +295,7 @@ if __name__ == "__main__":
         pad_left=True,
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
         target_mask_cluster_count=chunked_model_config["target_mask_cluster_count"],
-        cluster_easing=True,
+        cluster_easing=False
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
@@ -294,7 +305,7 @@ if __name__ == "__main__":
         mask_target_percentage=chunked_model_config["target_mask_percent"],
         mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
-        force_max_len_gen=chunked_model_config["force_max_len_gen"],
+        force_max_len_gen=chunked_model_config["force_max_len_gen"]
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -352,19 +363,12 @@ if __name__ == "__main__":
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
+    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16)
     model.zero_grad()
     for _ in range(epochs):
-        train_epoch(
-            model,
-            optimizer,
-            scheduler,
-            device,
-            train_loader,
-            chunked_model_config,
-            fp16,
-        )
+        trainer.train_epoch()
         # Slowly increase the mask percentage per epoch to make the model have to work harder.
         train_set.mask_target_percentage += 0.1
 
-    validate(model, device)
-    save_model(model, "final", chunked_model_config)
+    trainer.validate()
+    trainer.save_model("final")
