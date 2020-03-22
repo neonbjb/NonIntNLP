@@ -14,7 +14,7 @@ if fp16:
 
 
 class Trainer:
-    def __init__(self, model, chunked_model_config, train_dataloader, val_dataloader, optimizer, scheduler, device="cuda", is_fp16=False):
+    def __init__(self, model, chunked_model_config, train_dataloader, val_dataloader, optimizer, scheduler, device="cuda", is_fp16=False, desired_batch_sz=64):
         self.model = model
         self.chunked_model_config = chunked_model_config
         self.train_dataloader = train_dataloader
@@ -23,6 +23,8 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device
         self.is_fp16 = is_fp16
+        self.desired_batch_sz = desired_batch_sz
+        assert(self.desired_batch_sz % self.chunked_model_config["batch_size"] == 0)
 
         self.preprocess_times = []
         self.forward_times = []
@@ -78,11 +80,15 @@ class Trainer:
         self.clear_timers()
 
         _epoch_iterator = tqdm(self.train_dataloader, desc="Train Iteration")
-        _steps = 0
+        _steps, _optimizer_steps = 0, 0
         _tr_loss, _logging_loss = 0, 0
         _chunks = 0
         _accuracy_accum, _accuracy_last = 0, 0
         self.model.train()
+
+        # This controls how many batches are required per optimizer step.
+        _batches_required_for_desired_sz = int(self.desired_batch_sz / self.chunked_model_config["batch_size"])
+        _cur_step = 0
 
         __s = time.time()
         for _step, _batch in enumerate(_epoch_iterator):
@@ -112,32 +118,32 @@ class Trainer:
                 _chunk_loss_schedule.append(_loss.item())
 
                 # Backwards
-                # Scale loss by the chunk size to give all sequences equal importance.
-                _scaled_loss = _loss / _num_chunks
                 __s = time.time()
                 if fp16:
-                    with amp.scale_loss(_scaled_loss, self.optimizer) as _scaled_loss:
-                        _scaled_loss.backward()
+                    with amp.scale_loss(_loss, self.optimizer) as _scaled_loss:
+                        _loss.backward()
                         backward_time = time.time() - __s
                 else:
-                    _scaled_loss.backward()
+                    _loss.backward()
                     backward_time = time.time() - __s
-                self.backward_times.append(backward_time)
-
-                # Update weights after all chunks have been processed.
                 if self.is_fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1)
                 else:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
-            __s = time.time()
-            self.optimizer.step()
-            self.opt_times.append(time.time() - __s)
-            self.scheduler.step()
-            self.model.zero_grad()
+                self.backward_times.append(backward_time)
+
+            # Update weights after all chunks have been processed at an interval to fulfill desired_batch_sz
+            _cur_step += 1
+            if _cur_step % _batches_required_for_desired_sz == 0:
+                __s = time.time()
+                self.optimizer.step()
+                self.opt_times.append(time.time() - __s)
+                self.scheduler.step()
+                self.model.zero_grad()
+                _optimizer_steps += 1
 
             # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
             _tr_loss += _loss.item()
-
             if _steps % _logging_steps == 0:
                 _loss_scalar = (_tr_loss - _logging_loss) / _logging_steps
                 _logging_loss = _tr_loss
@@ -146,6 +152,7 @@ class Trainer:
                 _chunks = 0
                 _logs["loss"] = _loss_scalar
                 _logs["learning_rate"] = self.scheduler.get_lr()[0]
+                _logs["optimizer_steps"] = _optimizer_steps
                 if do_wandb:
                     # wandb can fail if the network connection goes down. this shouldn't take down training.
                     try:
@@ -155,9 +162,9 @@ class Trainer:
                 else:
                     print(_logs)
 
-            if _steps % _steps_till_save == 0:
+            if _steps != 0 and _steps % _steps_till_save == 0:
                 self.save_model("chkpt_%i" % (_steps))
-            if _steps % _steps_till_validate == 0:
+            if _steps != 0 and _steps % _steps_till_validate == 0:
                 self.validate()
 
             _steps += 1
@@ -252,7 +259,7 @@ if __name__ == "__main__":
         "--start_lr", type=float, default=2e-5, help="Learning rate to start at."
     )
     parser.add_argument(
-        "--output_dir", type=str default=".", help="Directory where checkpoints saves will be made."
+        "--output_dir", type=str, default=".", help="Directory where checkpoints saves will be made."
     )
     args = parser.parse_args()
 
