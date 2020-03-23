@@ -99,8 +99,9 @@ class Trainer:
             _chunk_loss_schedule = []
             _num_chunks = len(_batch["input_ids"])
             _chunks += _num_chunks
-            for _masked_input_ids, _attention_masks, _labels, _perm_mask in zip(
-                _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"]
+            for _masked_input_ids, _attention_masks, _labels, _perm_mask, _token_type_ids, _target_mapping in zip(
+                _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"],
+                _batch["token_type_ids"], _batch["target_mappings"]
             ):
                 # Forward
                 _inputs = {
@@ -108,6 +109,8 @@ class Trainer:
                     "attention_mask": _attention_masks.to(self.device),
                     "labels": _labels.to(self.device),
                     "perm_mask": _perm_mask.to(self.device),
+                    "token_type_ids": _token_type_ids.to(self.device),
+                    "target_mapping": _target_mapping.to(self.device),
                 }
                 if _mems is not None:
                     _inputs["mems"] = _mems
@@ -186,8 +189,9 @@ class Trainer:
                     continue
                 _mems = None
                 _loss = None
-                for _masked_input_ids, _attention_masks, _labels, _perm_mask in zip(
-                    _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"]
+                for _masked_input_ids, _attention_masks, _labels, _perm_mask, _token_type_ids, _target_mapping in zip(
+                    _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"],
+                    _batch["token_type_ids"], _batch["target_mappings"]
                 ):
                     # Forward
                     _inputs = {
@@ -195,6 +199,8 @@ class Trainer:
                         "attention_mask": _attention_masks.to(self.device),
                         "labels": _labels.to(self.device),
                         "perm_mask": _perm_mask.to(self.device),
+                        "token_type_ids": _token_type_ids.to(self.device),
+                        "target_mapping": _target_mapping.to(self.device),
                     }
                     if _mems is not None:
                         _inputs["mems"] = _mems
@@ -226,7 +232,7 @@ if __name__ == "__main__":
         default="nonint-transformers-torch",
         help="Project name for wandb",
     )
-    parser.add_argument("--batch_sz", type=int, default=4, help="Batch size")
+    parser.add_argument("--batch_sz", type=int, default=3, help="Batch size")
     parser.add_argument(
         "--seq_sz", type=int, default=256, help="Sequence size to be fed into the model"
     )
@@ -284,7 +290,7 @@ if __name__ == "__main__":
         "target_mask_percent": 0.0,
         "target_mask_cluster_count": 1,
         "text_mask_percentage": 0.0,
-        "force_max_len_gen": False,
+        "force_max_len_gen": True,
         "mem_len": 1024,
     }
 
@@ -305,7 +311,7 @@ if __name__ == "__main__":
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
         target_mask_cluster_count=chunked_model_config["target_mask_cluster_count"],
         cluster_easing=False,
-        all_targets_get_labels=True,
+        target_mapping_labels=True,
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
@@ -316,7 +322,7 @@ if __name__ == "__main__":
         mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
-        all_targets_get_labels=True,
+        target_mapping_labels=True,
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -374,7 +380,7 @@ if __name__ == "__main__":
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
-    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16, desired_batch_sz=16)
+    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16, desired_batch_sz=6)
     model.zero_grad()
     for _ in range(epochs):
         trainer.train_epoch()

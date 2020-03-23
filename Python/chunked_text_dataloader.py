@@ -35,7 +35,7 @@ class ChunkedTextDataset(Dataset):
     # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
     # cluster_easing=When enabled, target_mask_cluster_count will approach max_gen_len as the dataset is iterated over.
     # includes_classification=When true, the dataloader will extract a classification token from the data file. This can be used to train critic models.
-    # all_targets_get_labels=When true, the dataloader will put the entire target sequence into labels, whether or not there are masks. Useful for modeling off of permutation masks.
+    # target_mapping_labels=When true, the dataset will output "target_mapping" and the "labels" output will be tied to that, rather than the entire sequence.
     def __init__(
         self,
         data_file: str,
@@ -49,7 +49,7 @@ class ChunkedTextDataset(Dataset):
         target_mask_cluster_count=1,
         cluster_easing=False,
         includes_classification=False,
-        all_targets_get_labels=False,
+        target_mapping_labels=False,
     ):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
@@ -63,7 +63,12 @@ class ChunkedTextDataset(Dataset):
         self.target_mask_cluster_count = target_mask_cluster_count
         self.cluster_easing = cluster_easing
         self.includes_classification = includes_classification
-        self.all_targets_get_labels = all_targets_get_labels
+        self.target_mapping_labels = target_mapping_labels
+
+        # force_max_len_gen is a constraint of target_mapping_labels. This is because the class that does batching
+        # requires that all labels have the same length, and target_mapping_labels forces labels to be of length target_text.
+        if target_mapping_labels:
+            assert force_max_len_gen
 
         # State variables for cluster easing.
         self.cluster_easing_current = self.target_mask_cluster_count
@@ -145,6 +150,12 @@ class ChunkedTextDataset(Dataset):
             for t_index in range(target_len):
                 target_permutation[t_index][0:t_index] = 0.0
 
+            # Build target mappings if needed. These are identical for all chunks - the target is just an eye tensor
+            # up to target_len and zeros everywhere else.
+            target_mapping = None
+            if self.target_mapping_labels:
+                target_mapping = torch.eye(target_len, self.max_chunk_len, dtype=torch.float)
+
             # Perform masking on the target if needed.
             target_masked = target.clone().detach()
             if self.cluster_easing:
@@ -158,7 +169,8 @@ class ChunkedTextDataset(Dataset):
                 cluster_mask_count=cluster_count,
             )
 
-            if self.all_targets_get_labels:
+            # If we are using target_mapping, than the labels will always get exactly the target and nothing else.
+            if self.target_mapping_labels:
                 label_append.copy_(target)
 
             # Now append the labels (and masks) per chunk
@@ -167,6 +179,7 @@ class ChunkedTextDataset(Dataset):
             attention_mask = []
             labels = []
             permutation_mask = []
+            target_mappings = []
             classifiers = None
             token_type_ids = None
             if self.force_max_len_gen:
@@ -185,20 +198,23 @@ class ChunkedTextDataset(Dataset):
                         [torch.ones(target_len, dtype=torch.float), c_att,], dim=0,
                     )
                 )
-
                 c_text_masked = torch.cat([target_masked, c_text,], dim=0,)
-
-                c_lab_full = torch.cat([label_append, c_lab,], dim=0,)
-
                 c_perm_mask = torch.cat([target_permutation, c_perm], dim=-1,)
 
-                # Now we just have to perform full masking.
-                c_text_masked, c_lab_full = self.perform_mask(
-                    c_text_masked, self.mask_all_percentage, c_lab_full, input_ids[-1]
-                )
+                if self.target_mapping_labels:
+                    c_lab_full = label_append
+                else:
+                    # Without target_mapping, the labels is the full sequence. Presumably in this case we're using masking so do that too.
+                    c_lab_full = torch.cat([label_append, c_lab,], dim=0,)
+                    # Now we just have to perform full masking.
+                    c_text_masked, c_lab_full = self.perform_mask(
+                        c_text_masked, self.mask_all_percentage, c_lab_full, input_ids[-1]
+                    )
+
                 input_ids_masked.append(c_text_masked)
                 labels.append(c_lab_full)
                 permutation_mask.append(c_perm_mask)
+                target_mappings.append(target_mapping)
 
                 if self.force_max_len_gen:
                     token_type_ids.append(
@@ -231,6 +247,8 @@ class ChunkedTextDataset(Dataset):
                 result["token_type_ids"] = token_type_ids
             if self.includes_classification:
                 result["classifiers"] = classifiers
+            if self.target_mapping_labels:
+                result["target_mappings"] = target_mappings
             return result
 
     def perform_mask(
@@ -420,21 +438,24 @@ def helpful_print_batch(batch, tokenizer):
         chk_sz = len(batch["input_ids"])
         chk_it = 0
         target_len = batch["target_len"][0][b]
-        for input_ids, att_mask, masked_input_ids, perm_mask, labels in zip(
+        for input_ids, att_mask, masked_input_ids, perm_mask, labels, token_type_ids, target_mapping in zip(
             batch["input_ids"],
             batch["attention_masks"],
             batch["input_ids_masked"],
             batch["permutation_masks"],
             batch["labels"],
+            batch["token_type_ids"],
+            batch["target_mappings"],
         ):
             print("************CHUNK %i/%i***********" % (chk_it + 1, chk_sz))
             chk_it += 1
             print("target=%s" % (tokenizer.decode(input_ids[b])))
+            print("token types=%s" % (token_type_ids[b].tolist()))
             print("***********************************")
             print(
                 ">>>>>>>>>>PERMUTATION/ATTENTION MASK VIEW. SHOULD SEE NO PADS (only <unk>) IN TEXT, PROPER MASKING OF INDIVIDUAL TARGET ELEMENTS."
             )
-            for t in range(target_len):
+            for t in range(target_len + 5):  # +5 to take a look at a few of the masks for the text tokens.
                 # perm_mask is 1 where masked, 0 where not masked. we need to invert that to make the masking easy.
                 perm_mask_list = perm_mask[b][t].tolist()
                 perm_mask_list = [1.0 if ele == 0 else 0.0 for ele in perm_mask_list]
@@ -532,11 +553,15 @@ def test_against_real_file(test_file, tokenizer):
     dataset = ChunkedTextDataset(
         data_file=test_file,
         tokenizer=tokenizer,
-        target_mask_cluster_count=1,
-        mask_target_percentage=0.2,
+        max_chunk_len=256,
+        max_gen_len=32,
+        mask_target_percentage=0,
         mask_all_percentage=0,
         pad_left=True,
-        all_targets_get_labels=True,
+        force_max_len_gen=True,
+        target_mask_cluster_count=1,
+        cluster_easing=False,
+        target_mapping_labels=True
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
