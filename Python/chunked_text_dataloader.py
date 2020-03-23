@@ -32,8 +32,6 @@ class ChunkedTextDataset(Dataset):
     # force_max_len_gen=If true, target text will be padded to <max_gen_len> in every input sequence and token type IDs
     #                   will be generated.
     # pad_left=Whether the padding should go on the left or the right.
-    # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
-    # cluster_easing=When enabled, target_mask_cluster_count will approach max_gen_len as the dataset is iterated over.
     # includes_classification=When true, the dataloader will extract a classification token from the data file. This can be used to train critic models.
     # target_mapping_labels=When true, the dataset will output "target_mapping" and the "labels" output will be tied to that, rather than the entire sequence.
     def __init__(
@@ -46,8 +44,6 @@ class ChunkedTextDataset(Dataset):
         mask_all_percentage=0.1,
         force_max_len_gen=False,
         pad_left=False,
-        target_mask_cluster_count=1,
-        cluster_easing=False,
         includes_classification=False,
         target_mapping_labels=False,
     ):
@@ -60,8 +56,6 @@ class ChunkedTextDataset(Dataset):
         self.force_max_len_gen = force_max_len_gen
         self.raw_data = torch.load(data_file)
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
-        self.target_mask_cluster_count = target_mask_cluster_count
-        self.cluster_easing = cluster_easing
         self.includes_classification = includes_classification
         self.target_mapping_labels = target_mapping_labels
 
@@ -69,11 +63,6 @@ class ChunkedTextDataset(Dataset):
         # requires that all labels have the same length, and target_mapping_labels forces labels to be of length target_text.
         if target_mapping_labels:
             assert force_max_len_gen
-
-        # State variables for cluster easing.
-        self.cluster_easing_current = self.target_mask_cluster_count
-        cluster_easing_interval = self.max_gen_len - self.cluster_easing_current
-        self.cluster_easing_inc = cluster_easing_interval / len(self.raw_data)
 
     def process_element(self, text, target, classifier):
         # Tokens represented as 1-hot tensors which will be reused later in this function.
@@ -158,15 +147,9 @@ class ChunkedTextDataset(Dataset):
 
             # Perform masking on the target if needed.
             target_masked = target.clone().detach()
-            if self.cluster_easing:
-                cluster_count = int(self.cluster_easing_current)
-                self.cluster_easing_current += self.cluster_easing_inc
-            else:
-                cluster_count = self.target_mask_cluster_count
             target_masked, label_append = self.perform_mask(
                 target_masked,
                 self.mask_target_percentage,
-                cluster_mask_count=cluster_count,
             )
 
             # If we are using target_mapping, than the labels will always get exactly the target and nothing else.
@@ -257,7 +240,6 @@ class ChunkedTextDataset(Dataset):
         mask_percentage: float,
         prefilled_labels=None,
         truth_values=None,
-        cluster_mask_count=1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.tokenizer.mask_token is None:
             raise ValueError(
@@ -281,19 +263,6 @@ class ChunkedTextDataset(Dataset):
             padding_mask = labels.eq(self.tokenizer.pad_token_id)
             probability_matrix.masked_fill_(padding_mask, value=0.0)
         masked_indices = torch.bernoulli(probability_matrix).bool()
-
-        # cluster_mask_count works thusly:
-        # If it is specified and a value > 1, then wherever we are going to mask the input, we also mask the next
-        # <cluster_mask_count> input elements as well. Note that this will indiscriminately mask pads and special
-        # tokens, and that should be OK.
-        if cluster_mask_count > 1:
-            cluster_decay = 0
-            for i in range(masked_indices.shape[-1]):
-                if masked_indices[i]:
-                    cluster_decay = cluster_mask_count
-                if cluster_decay > 0:
-                    cluster_decay -= 1
-                    masked_indices[i] = True
 
         if prefilled_labels is None:
             labels[~masked_indices] = -100  # We only compute loss on masked tokens
@@ -509,7 +478,7 @@ def perform_tests(batch, chk_sz):
 
             # Check <bos> and <eos> tokens are placed as expected on the target.
             Check(inputs[0]).equals(tokenizer.bos_token_id)
-            Check(inputs[target_len - 1]).equals(tokenizer.eos_token_id)
+            assert tokenizer.eos_token_id in ii[1:target_len - 1]
 
             # Each chunk should start with <bos>
             if c == 0:
@@ -521,14 +490,16 @@ def perform_tests(batch, chk_sz):
 
             # Iterate over each token position.
             for i in range(seq_len):
-                # Check that we can find the proper input tokens in either the labels or the masked input ids.
-                if labels[i] == -100:
-                    Check(iim[i]).equals(inputs[i])
-                else:
-                    Check(labels[i]).equals(inputs[i])
+                if len(labels) == len(iim):  # Cursory check for if target_mapping_labels=True
+                    # Check that we can find the proper input tokens in either the labels or the masked input ids.
+                    if labels[i] == -100:
+                        Check(iim[i]).equals(inputs[i])
+                    else:
+                        Check(labels[i]).equals(inputs[i])
 
                 # Check attention mask.
-                Check(mask[i]).equals(0 if inputs[i] == tokenizer.pad_token_id else 1)
+                if i > target_len:  # Target can have pads, but no attention mask to avoid giving details to the model.
+                    Check(mask[i]).equals(0 if inputs[i] == tokenizer.pad_token_id else 1)
 
                 # Check permutation mask has 0's (unmasked) for all previous target elements and 1's (masked) for
                 # all following target elements, and 0's for all text elements. Text elements should mask all
@@ -543,10 +514,6 @@ def perform_tests(batch, chk_sz):
                     else:
                         Check(perm_mask[i][sq]).equals(0.0)
 
-    # Keep in mind that only 80% of the "masked" tokens are actually replaced with <mask>. Note that this test
-    # is inherently flaky. But it should be good enough..
-    Check(masks / target_toks).is_at_least(0.1)
-
 
 def test_against_real_file(test_file, tokenizer):
     batchsz = 16
@@ -559,8 +526,6 @@ def test_against_real_file(test_file, tokenizer):
         mask_all_percentage=0,
         pad_left=True,
         force_max_len_gen=True,
-        target_mask_cluster_count=1,
-        cluster_easing=False,
         target_mapping_labels=True
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
