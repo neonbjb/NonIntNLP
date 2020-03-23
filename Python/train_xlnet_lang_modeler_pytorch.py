@@ -99,14 +99,15 @@ class Trainer:
             _chunk_loss_schedule = []
             _num_chunks = len(_batch["input_ids"])
             _chunks += _num_chunks
-            for _masked_input_ids, _attention_masks, _labels in zip(
-                _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
+            for _masked_input_ids, _attention_masks, _labels, _perm_mask in zip(
+                _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"]
             ):
                 # Forward
                 _inputs = {
                     "input_ids": _masked_input_ids.to(self.device),
                     "attention_mask": _attention_masks.to(self.device),
                     "labels": _labels.to(self.device),
+                    "perm_mask": _perm_mask.to(self.device),
                 }
                 if _mems is not None:
                     _inputs["mems"] = _mems
@@ -185,14 +186,15 @@ class Trainer:
                     continue
                 _mems = None
                 _loss = None
-                for _masked_input_ids, _attention_masks, _labels in zip(
-                    _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"]
+                for _masked_input_ids, _attention_masks, _labels, _perm_mask in zip(
+                    _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"]
                 ):
                     # Forward
                     _inputs = {
                         "input_ids": _masked_input_ids.to(self.device),
                         "attention_mask": _attention_masks.to(self.device),
                         "labels": _labels.to(self.device),
+                        "perm_mask": _perm_mask.to(self.device),
                     }
                     if _mems is not None:
                         _inputs["mems"] = _mems
@@ -279,9 +281,9 @@ if __name__ == "__main__":
         "batch_size": batch_size,
         "starting_lr": start_lr,
         "output_dir": args.output_dir,
-        "target_mask_percent": 0.3,
-        "target_mask_cluster_count": 3,
-        "text_mask_percentage": 0.1,
+        "target_mask_percent": 0.0,
+        "target_mask_cluster_count": 1,
+        "text_mask_percentage": 0.0,
         "force_max_len_gen": False,
         "mem_len": 1024,
     }
@@ -302,7 +304,8 @@ if __name__ == "__main__":
         pad_left=True,
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
         target_mask_cluster_count=chunked_model_config["target_mask_cluster_count"],
-        cluster_easing=False
+        cluster_easing=False,
+        all_targets_get_labels=True,
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
@@ -312,7 +315,8 @@ if __name__ == "__main__":
         mask_target_percentage=chunked_model_config["target_mask_percent"],
         mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
-        force_max_len_gen=chunked_model_config["force_max_len_gen"]
+        force_max_len_gen=chunked_model_config["force_max_len_gen"],
+        all_targets_get_labels=True,
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -370,7 +374,7 @@ if __name__ == "__main__":
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
-    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16)
+    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16, desired_batch_sz=16)
     model.zero_grad()
     for _ in range(epochs):
         trainer.train_epoch()

@@ -181,7 +181,7 @@ def process_csv_line(line):
 DEVICE = "cuda"
 
 # Load model
-output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_title_generation\chkpt_4000"
+output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_trainer_checkpoints/local_title_256_batched_chunks_target_batch_64"
 #output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_xsum/colab_initial_go_12000_batches"
 
 with open(os.path.join(output_dir, "chunk_config.json"), "r") as chunk_cfg:

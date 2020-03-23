@@ -86,7 +86,10 @@ def train_epoch(
         _num_chunks = len(_batch["input_ids"])
         _chunks += _num_chunks
         for _input_ids, _token_type_ids, _attention_masks, _labels in zip(
-            _batch["input_ids"], _batch["token_type_ids"], _batch["attention_masks"], _batch["classifiers"]
+            _batch["input_ids"],
+            _batch["token_type_ids"],
+            _batch["attention_masks"],
+            _batch["classifiers"],
         ):
             # Forward
             _inputs = {
@@ -170,7 +173,10 @@ def validate(_model, _device):
             _mems = None
             _loss = None
             for _input_ids, _token_type_ids, _attention_masks, _labels in zip(
-                _batch["input_ids"], _batch["token_type_ids"], _batch["attention_masks"], _batch["classifiers"]
+                _batch["input_ids"],
+                _batch["token_type_ids"],
+                _batch["attention_masks"],
+                _batch["classifiers"],
             ):
                 # Forward
                 _inputs = {
@@ -284,7 +290,7 @@ if __name__ == "__main__":
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
         target_mask_cluster_count=chunked_model_config["target_mask_cluster_count"],
         cluster_easing=False,
-        includes_classification=True
+        includes_classification=True,
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
@@ -295,7 +301,7 @@ if __name__ == "__main__":
         mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
-        includes_classification=True
+        includes_classification=True,
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -314,7 +320,7 @@ if __name__ == "__main__":
         chunked_model_config["model_name"]
     )
     config.mem_len = chunked_model_config["mem_len"]
-    config.num_labels = 1 # Just straight-up MSE for this.
+    config.num_labels = 1  # Just straight-up MSE for this.
     model = transformers.XLNetForSequenceClassification.from_pretrained(
         chunked_model_config["model_name"], config=config
     )

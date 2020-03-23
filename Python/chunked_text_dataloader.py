@@ -35,6 +35,7 @@ class ChunkedTextDataset(Dataset):
     # target_mask_cluster_count=The number of contiguous target tokens to mask for a given mask event. (Obscure - sorry)
     # cluster_easing=When enabled, target_mask_cluster_count will approach max_gen_len as the dataset is iterated over.
     # includes_classification=When true, the dataloader will extract a classification token from the data file. This can be used to train critic models.
+    # all_targets_get_labels=When true, the dataloader will put the entire target sequence into labels, whether or not there are masks. Useful for modeling off of permutation masks.
     def __init__(
         self,
         data_file: str,
@@ -48,6 +49,7 @@ class ChunkedTextDataset(Dataset):
         target_mask_cluster_count=1,
         cluster_easing=False,
         includes_classification=False,
+        all_targets_get_labels=False,
     ):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
@@ -61,31 +63,29 @@ class ChunkedTextDataset(Dataset):
         self.target_mask_cluster_count = target_mask_cluster_count
         self.cluster_easing = cluster_easing
         self.includes_classification = includes_classification
+        self.all_targets_get_labels = all_targets_get_labels
 
         # State variables for cluster easing.
         self.cluster_easing_current = self.target_mask_cluster_count
         cluster_easing_interval = self.max_gen_len - self.cluster_easing_current
         self.cluster_easing_inc = cluster_easing_interval / len(self.raw_data)
 
-        # Each chunk will get a BOS, CLS and EOS token added to it.
-        self.special_tokens_per_chunk = 3
-
     def process_element(self, text, target, classifier):
         # Tokens represented as 1-hot tensors which will be reused later in this function.
         bos_token_tensor = torch.tensor([self.tokenizer.bos_token_id], dtype=torch.long)
         eos_token_tensor = torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)
-        sep_token_tensor = torch.tensor([self.tokenizer.sep_token_id], dtype=torch.long)
-        mask_token_tensor = torch.tensor(
-            [self.tokenizer.mask_token_id], dtype=torch.long
-        )
-        zero_token_tensor = torch.tensor([0], dtype=torch.long)
-        one_token_float_tensor = torch.tensor([1], dtype=torch.float)
-        one_token_tensor = torch.tensor([1], dtype=torch.long)
-        n100_token_tensor = torch.tensor([-100], dtype=torch.long)
+
         with torch.no_grad():
+            # Targets and text always get <bos> and <eos> on them.
+            target = torch.cat([bos_token_tensor, target, eos_token_tensor])
+            text = torch.cat([bos_token_tensor, text, eos_token_tensor])
+
             target_len = target.shape[0]
             if target_len > self.max_gen_len:
+                # Truncate.
                 target = target[: self.max_gen_len]
+                # Keep the <eos> token post-trucation.
+                target[-1] = self.tokenizer.eos_token_id
                 target_len = self.max_gen_len
             elif target_len < self.max_gen_len and self.force_max_len_gen:
                 masks_to_fill_target = self.max_gen_len - target_len
@@ -100,14 +100,9 @@ class ChunkedTextDataset(Dataset):
             # Create attention_masks that'll go along with this tokenized text.
             attention_mask = torch.ones(text.shape[0], dtype=torch.float)
 
-            # Each chunk will get a BOS, SEP and EOS token added to it.
-            self.special_tokens_per_chunk = 3
-
             # We will chunk all inputs so that none exceed max_chunk_len, which will all be fed into the model
             # sequentially. Some set-up is necessary first.
-            text_len_per_chunk = (
-                self.max_chunk_len - target_len - self.special_tokens_per_chunk
-            )
+            text_len_per_chunk = self.max_chunk_len - target_len
             num_chunks = math.ceil(text.shape[0] / text_len_per_chunk)
             final_text_seq_len = num_chunks * text_len_per_chunk
 
@@ -132,9 +127,23 @@ class ChunkedTextDataset(Dataset):
                 (final_text_seq_len,), fill_value=-100, dtype=torch.long
             )
 
+            # The permutation mask is also easy - all 0s for the text; all tokens attend to each other.
+            perm_mask = torch.zeros(
+                (self.max_chunk_len, final_text_seq_len), dtype=torch.float
+            )
+
             chunked_text = torch.chunk(text, chunks=num_chunks)
             chunked_attention = torch.chunk(attention_mask, chunks=num_chunks)
             chunked_labels = torch.chunk(labels, chunks=num_chunks)
+            chunked_perm_mask = torch.chunk(perm_mask, chunks=num_chunks, dim=-1)
+
+            # Create a permutation mask for the target. Our goal is sequential generation, so the permutation will
+            # also be sequential. We won't let the text perform any attention on the title.
+            target_permutation = torch.ones(
+                (self.max_chunk_len, target_len), dtype=torch.float
+            )
+            for t_index in range(target_len):
+                target_permutation[t_index][0:t_index] = 0.0
 
             # Perform masking on the target if needed.
             target_masked = target.clone().detach()
@@ -149,11 +158,15 @@ class ChunkedTextDataset(Dataset):
                 cluster_mask_count=cluster_count,
             )
 
+            if self.all_targets_get_labels:
+                label_append.copy_(target)
+
             # Now append the labels (and masks) per chunk
             input_ids = []
             input_ids_masked = []
             attention_mask = []
             labels = []
+            permutation_mask = []
             classifiers = None
             token_type_ids = None
             if self.force_max_len_gen:
@@ -161,55 +174,23 @@ class ChunkedTextDataset(Dataset):
             if self.includes_classification:
                 classifiers = []
                 encoded_classifier = torch.tensor(classifier, dtype=torch.float)
-            for c_text, c_att, c_lab in zip(
-                chunked_text, chunked_attention, chunked_labels
+
+            # Now we're going to concatenate the per-chunk parts with the target parts.
+            for c_text, c_att, c_lab, c_perm in zip(
+                chunked_text, chunked_attention, chunked_labels, chunked_perm_mask
             ):
-                # This is where we're going to stick in all the special tokens, which makes these a little hard to
-                # read. Remember: 3 special tokens. BOS at beginning, SEP to separate target and text. EOS at end (which
-                # was already added). Regardless - every output should have at least 2 values added to it.
-                input_ids.append(
-                    torch.cat(
-                        [
-                            bos_token_tensor,
-                            target,
-                            sep_token_tensor,
-                            c_text,
-                            eos_token_tensor,
-                        ],
-                        dim=0,
-                    )
-                )
+                input_ids.append(torch.cat([target, c_text,], dim=0,))
                 attention_mask.append(
                     torch.cat(
-                        [
-                            torch.ones(target_len + 2, dtype=torch.float),
-                            c_att,
-                            one_token_float_tensor,
-                        ],
-                        dim=0,
+                        [torch.ones(target_len, dtype=torch.float), c_att,], dim=0,
                     )
                 )
 
-                c_text_masked = torch.cat(
-                    [
-                        bos_token_tensor,
-                        target_masked,
-                        mask_token_tensor,  # Always mask the [SEP] tokens - let the model guess where they are.
-                        c_text,
-                        eos_token_tensor,
-                    ],
-                    dim=0,
-                )
-                c_lab_full = torch.cat(
-                    [
-                        n100_token_tensor,
-                        label_append,
-                        sep_token_tensor,
-                        c_lab,
-                        n100_token_tensor,
-                    ],
-                    dim=0,
-                )
+                c_text_masked = torch.cat([target_masked, c_text,], dim=0,)
+
+                c_lab_full = torch.cat([label_append, c_lab,], dim=0,)
+
+                c_perm_mask = torch.cat([target_permutation, c_perm], dim=-1,)
 
                 # Now we just have to perform full masking.
                 c_text_masked, c_lab_full = self.perform_mask(
@@ -217,6 +198,7 @@ class ChunkedTextDataset(Dataset):
                 )
                 input_ids_masked.append(c_text_masked)
                 labels.append(c_lab_full)
+                permutation_mask.append(c_perm_mask)
 
                 if self.force_max_len_gen:
                     token_type_ids.append(
@@ -238,6 +220,12 @@ class ChunkedTextDataset(Dataset):
                 "input_ids_masked": input_ids_masked,
                 "attention_masks": attention_mask,
                 "labels": labels,
+                "permutation_masks": permutation_mask,
+                # This is included for debugging and testing
+                "target_len": [
+                    torch.tensor(target_len, dtype=torch.long)
+                    for cs in range(num_chunks)
+                ],
             }
             if token_type_ids is not None:
                 result["token_type_ids"] = token_type_ids
@@ -257,11 +245,13 @@ class ChunkedTextDataset(Dataset):
             raise ValueError(
                 "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
             )
+
         # "truth_values" are for when we are performing double-masking and <tensor> may have already been corrupted with
         # random values. If it is set to None, use <tensor>
         if truth_values is None:
             truth_values = tensor
         labels = truth_values.clone()
+
         probability_matrix = torch.full(labels.shape, mask_percentage)
         special_tokens_mask = self.tokenizer.get_special_tokens_mask(
             labels, already_has_special_tokens=True
@@ -322,9 +312,13 @@ class ChunkedTextDataset(Dataset):
             if target_len > self.max_gen_len:
                 target_len = self.max_gen_len
             text_len_per_chunk = (
-                self.max_chunk_len - target_len - self.special_tokens_per_chunk
+                self.max_chunk_len
+                - target_len
+                - 2  # -2 for <bos> and <eos> per-target prepended.
             )
-            return math.ceil(text.shape[0] / text_len_per_chunk)
+            return math.ceil(
+                (text.shape[0] + 2) / text_len_per_chunk
+            )  # +2 for <bos> and <eos> appended on text.
 
     # The output of this Dataloader is a dict as follows:
     # 'input_ids':        A list of tokenized strings (chunks) with the target string append on the end after a <CLS> token.
@@ -413,10 +407,136 @@ class ChunkedTextBatchSampler(Sampler):
         return int(len(self.chunked_text_set) / self.batch_sz)
 
 
+###########################################################################################
+# That's it for the functional logic. Everything else in this file is for testing
+# the functionality of above. Included are some simple tests as well as some code you can
+# use to see what the output of this dataloader would be against a given file.
+###########################################################################################
+
+
+def helpful_print_batch(batch, tokenizer):
+    for b in range(batch["input_ids"][0].shape[0]):
+        print("$$$$$$$$$$$$$$$  BATCH %i  $$$$$$$$$$$$$" % (b))
+        chk_sz = len(batch["input_ids"])
+        chk_it = 0
+        target_len = batch["target_len"][0][b]
+        for input_ids, att_mask, masked_input_ids, perm_mask, labels in zip(
+            batch["input_ids"],
+            batch["attention_masks"],
+            batch["input_ids_masked"],
+            batch["permutation_masks"],
+            batch["labels"],
+        ):
+            print("************CHUNK %i/%i***********" % (chk_it + 1, chk_sz))
+            chk_it += 1
+            print("target=%s" % (tokenizer.decode(input_ids[b])))
+            print("***********************************")
+            print(
+                ">>>>>>>>>>PERMUTATION/ATTENTION MASK VIEW. SHOULD SEE NO PADS (only <unk>) IN TEXT, PROPER MASKING OF INDIVIDUAL TARGET ELEMENTS."
+            )
+            for t in range(target_len):
+                # perm_mask is 1 where masked, 0 where not masked. we need to invert that to make the masking easy.
+                perm_mask_list = perm_mask[b][t].tolist()
+                perm_mask_list = [1.0 if ele == 0 else 0.0 for ele in perm_mask_list]
+                perm_mask_inverted = torch.tensor(perm_mask_list, dtype=torch.float)
+                masked = masked_input_ids[b] * att_mask[b] * perm_mask_inverted
+                print(tokenizer.decode(masked))
+            print(
+                ">>>>>>>>>>TARGET VIEW. FIRST IS FULL MASKED INPUT. SECOND IS LABELS. LABELS SHOULD BE <unk> WHERE NOT MASKED, ACTUAL TOKEN WHERE <MASK>ED."
+            )
+            print(tokenizer.decode(masked_input_ids[b]))
+            labels_fixed = labels[b].tolist()
+            labels_fixed = [0.0 if lbl == -100 else lbl for lbl in labels_fixed]
+            print(tokenizer.decode(labels_fixed))
+            print("***********************************")
+
+
+# Check a bunch of things:
+# - Are there masks? Are they in a range of expected proportions?
+# - If we use labels to restore input_ids_masked, do we get input_ids?
+# - Does padding only occur in the last chunk and does it occur on the left? (using attention mask)
+# - Does the sequence contain <bos>, <eos> and <sep>?
+# These aren't conclusive tests, but they give a good sense for whether or not this algorithm is working as
+# expected.
+# Note that these test are not optimized at all. They run EXTREMELY slowly, like up to a minute per sequence on
+# a top end PC.
+def perform_tests(batch, chk_sz):
+    batchsz = batch["input_ids"][0].shape[0]
+    masks = 0
+    target_toks = 0
+    for c in range(chk_sz):
+        print("chunk %i" % (c))
+        for b in range(batchsz):
+            if random.uniform(0, 1) < 0.9:
+                # Just skip most of these. We only need a few of them for testing.
+                continue
+            print("batch element %i" % (b))
+            ii = batch["input_ids"][c][b].tolist()
+            iim = batch["input_ids_masked"][c][b].tolist()
+
+            seq_len = len(ii)
+            target_len = batch["target_len"][c][b]
+
+            masks += iim.count(tokenizer.mask_token_id)
+            target_toks += target_len
+
+            labels = batch["labels"][c][b]
+            inputs = batch["input_ids"][c][b]
+            mask = batch["attention_masks"][c][b]
+            perm_mask = batch["permutation_masks"][c][b]
+            Check(perm_mask.shape).equals((len(ii), len(ii)))
+
+            # Check <bos> and <eos> tokens are placed as expected on the target.
+            Check(inputs[0]).equals(tokenizer.bos_token_id)
+            Check(inputs[target_len - 1]).equals(tokenizer.eos_token_id)
+
+            # Each chunk should start with <bos>
+            if c == 0:
+                # If padding is left-aligned, <bos> can be far into the text sequence.
+                assert tokenizer.bos_token_id in ii[target_len:]
+            # And should have an <eos> in its last chunk
+            elif c == chk_sz - 1:
+                assert tokenizer.eos_token_id in ii
+
+            # Iterate over each token position.
+            for i in range(seq_len):
+                # Check that we can find the proper input tokens in either the labels or the masked input ids.
+                if labels[i] == -100:
+                    Check(iim[i]).equals(inputs[i])
+                else:
+                    Check(labels[i]).equals(inputs[i])
+
+                # Check attention mask.
+                Check(mask[i]).equals(0 if inputs[i] == tokenizer.pad_token_id else 1)
+
+                # Check permutation mask has 0's (unmasked) for all previous target elements and 1's (masked) for
+                # all following target elements, and 0's for all text elements. Text elements should mask all
+                # target elements.
+                for sq in range(seq_len):
+                    # If we're looking at a text token, all targets should be masked.
+                    if i >= target_len and sq < target_len:
+                        Check(perm_mask[i][sq]).equals(1.0)
+                    # If we're looking at a target token, subsequent targets should be masked.
+                    elif i < target_len and sq >= i and sq < target_len:
+                        Check(perm_mask[i][sq]).equals(1.0)
+                    else:
+                        Check(perm_mask[i][sq]).equals(0.0)
+
+    # Keep in mind that only 80% of the "masked" tokens are actually replaced with <mask>. Note that this test
+    # is inherently flaky. But it should be good enough..
+    Check(masks / target_toks).is_at_least(0.1)
+
+
 def test_against_real_file(test_file, tokenizer):
     batchsz = 16
     dataset = ChunkedTextDataset(
-        data_file=test_file, tokenizer=tokenizer, target_mask_cluster_count=3
+        data_file=test_file,
+        tokenizer=tokenizer,
+        target_mask_cluster_count=1,
+        mask_target_percentage=0.2,
+        mask_all_percentage=0,
+        pad_left=True,
+        all_targets_get_labels=True,
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
@@ -427,55 +547,12 @@ def test_against_real_file(test_file, tokenizer):
         print("Processing batch %i/%i chunk_sz = %i" % (_b_n, len(loader), chk_sz))
         _b_n += 1
 
-        # Check a bunch of things:
-        # - Are there masks? Are they in a range of expected proportions?
-        # - If we use labels to restore input_ids_masked, do we get input_ids?
-        # - Does padding only occur in the last chunk and does it occur on the left? (using attention mask)
-        # - Does the sequence contain <bos>, <eos> and <sep>?
-        # These aren't conclusive tests, but they give a good sense for whether or not this algorithm is working as
-        # expected.
-        masks = 0
-        target_toks = 0
-        for c in range(chk_sz):
-            print("chunk %i" % (c))
-            for b in range(batchsz):
-                if random.uniform(0, 1) < 0.9:
-                    # Just skip most of these. We only need a few of them for testing.
-                    continue
-                print("batch element %i" % (b))
-                ii = batch["input_ids"][c][b].tolist()
-                iim = batch["input_ids_masked"][c][b].tolist()
-
-                masks += iim.count(tokenizer.mask_token_id)
-                target_tok_count = ii.index(tokenizer.sep_token_id)
-                target_toks += target_tok_count
-
-                iim_v = batch["input_ids_masked"][c][b]
-                labels = batch["labels"][c][b]
-                inputs = batch["input_ids"][c][b]
-                mask = batch["attention_masks"][c][b]
-                sep_enc = False
-                for i in range(labels.shape[0]):
-                    if ii[i] == tokenizer.sep_token_id:
-                        sep_enc = True
-                        continue
-
-                    # Check that we can find the proper input tokens in either the labels or the masked input ids.
-                    if labels[i] == -100:
-                        Check(iim[i]).equals(inputs[i])
-                    else:
-                        Check(labels[i]).equals(inputs[i])
-
-                    # Check attention mask.
-                    Check(mask[i]).equals(
-                        0 if inputs[i] == tokenizer.pad_token_id else 1
-                    )
-
-        # Keep in mind that only 80% of the "masked" tokens are actually replaced with <mask>. Note that this test
-        # is inherently flaky. But it should be good enough..
-        Check(masks / target_toks).is_at_least(0.1)
+        helpful_print_batch(batch, tokenizer)
+        perform_tests(batch, chk_sz)
 
 
+# This test applies the dataset rules against some raw text, then attempts to print out the results as the model would
+# see them.
 def test_against_test_set(tokenizer):
     # Check the actual conversions.
     def test_enc(str):
@@ -510,21 +587,11 @@ def test_against_test_set(tokenizer):
     torch.save(test_set, "test.pt")
     dataset = ChunkedTextDataset(data_file="test.pt", tokenizer=tokenizer)
     loader = dataset.get_dataloader(batch_sz=1)
-    it = 0
+    batch_it = 0
     for batch in loader:
-        chk_sz = len(batch["input_ids"])
-        compiled_text = ""
-        for c in range(chk_sz):
-            inputs = batch["input_ids"][c][0].tolist()
-            target_tok_count = inputs.index(tokenizer.sep_token_id)
-            text_tens = tokenizer.decode(inputs[target_tok_count + 1 :])
-            text_tens = text_tens.replace(tokenizer.pad_token, "")
-            text_tens = text_tens.replace(tokenizer.eos_token, "")
-            compiled_text += text_tens
-        Check(compiled_text.strip()).equals(
-            tokenizer.decode(test_set[it]["text"]).strip()
-        )
-        it += 1
+        print("##########BATCH %i#############" % (batch_it))
+        batch_it += 1
+        helpful_print_batch(batch, tokenizer)
 
 
 if __name__ == "__main__":
@@ -537,4 +604,4 @@ if __name__ == "__main__":
         "C:\\Users\\jbetk\\Documents\\data\\ml\\title_prediction\\outputs\\val.pt"
     )
     test_against_real_file(test_file, tokenizer)
-    test_against_test_set(tokenizer)
+    # test_against_test_set(tokenizer)
