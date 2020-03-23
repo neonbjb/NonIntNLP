@@ -14,8 +14,8 @@ class ChunkedGenerator:
         self.repetition_penalty = repetition_penalty
         self.device = device
         self.k_count = 3
-        self.branch_threshold = branch_threshold # Min probability (as a percent of the top probability) assigned to a top-k prediction to justify branching.
-        self.max_predictions = 24 # Maximum number of predictions this generator will make. After reaching this point, it will cease branching.
+        self.branch_threshold = branch_threshold  # Min probability (as a percent of the top probability) assigned to a top-k prediction to justify branching.
+        self.max_predictions = 24  # Maximum number of predictions this generator will make. After reaching this point, it will cease branching.
         self.use_token_types = use_token_types
 
     # Create inputs to the model for a given chunk of input_ids and a partially generated output.
@@ -23,6 +23,7 @@ class ChunkedGenerator:
         self,
         _chunk: torch.Tensor,
         _outputs_so_far: torch.Tensor,
+        _current_prediction_index: int,
         _mems: torch.Tensor,
     ):
         _batch_count, _output_len = _outputs_so_far.shape
@@ -30,8 +31,21 @@ class ChunkedGenerator:
         _chunk_expanded = _chunk.unsqueeze(0)
         _chunk_expanded = _chunk_expanded.expand(_batch_count, _chunk_expanded.shape[-1])
         _input_ids = torch.cat([_outputs_so_far, _chunk_expanded], dim=-1)
+
+        _target_map = torch.zeros((1, 1, self.max_seq_len), dtype=torch.float)
+        _target_map[0][0][_current_prediction_index] = 1.0
+        _target_map = _target_map.expand((_batch_count, 1, self.max_seq_len))
+
+        _perm_mask_text = torch.zeros((1, self.max_seq_len, _chunk.shape[-1], ), dtype=torch.float)
+        _perm_mask_target = torch.ones((1, self.max_seq_len, _output_len), dtype=torch.float)
+        for t_index in range(_output_len):
+            _perm_mask_target[0][t_index][0:t_index] = 0.0
+        _perm_mask = torch.cat([_perm_mask_target, _perm_mask_text], dim=-1).expand((_batch_count, self.max_seq_len, self.max_seq_len))
+
         _inputs = {
             "input_ids": _input_ids.to(self.device),
+            "perm_mask": _perm_mask.to(self.device),
+            "target_mapping": _target_map.to(self.device)
         }
 
         if self.use_token_types:
@@ -68,7 +82,7 @@ class ChunkedGenerator:
         _mems = None
         for _chunk in _tok_text_chunked:
             _inputs = self.create_inputs_for_chunk(
-                _chunk, _outputs_so_far, _mems
+                _chunk, _outputs_so_far, _predict_index, _mems
             )
             _logits, _mems = self.model.forward(**_inputs)
 
@@ -80,10 +94,10 @@ class ChunkedGenerator:
                 _scan_start = 0
             for b in range(_batch_count):
                 for i in range(_scan_start, _predict_index):
-                    if _logits[b][_predict_index][_outputs_so_far[b][i]] < 0:
-                        _logits[b][_predict_index][_outputs_so_far[b][i]] *= self.repetition_penalty
+                    if _logits[b][0][_outputs_so_far[b][i]] < 0:
+                        _logits[b][0][_outputs_so_far[b][i]] *= self.repetition_penalty
                     else:
-                        _logits[b][_predict_index][_outputs_so_far[b][i]] /= self.repetition_penalty
+                        _logits[b][0][_outputs_so_far[b][i]] /= self.repetition_penalty
 
         _p_sft = torch.softmax(_logits, dim=-1)
         _top_k = torch.topk(_p_sft, self.k_count)
@@ -112,8 +126,8 @@ class ChunkedGenerator:
                 _individual_prediction = _predict_tensor[b].clone().detach().unsqueeze(0)
 
                 # Always take the most likely word.
-                _individual_prediction[0][i] = _words[b][i][0]
-                _top_probability = _probs[b][i][0]
+                _individual_prediction[0][i] = _words[b][0][0]
+                _top_probability = _probs[b][0][0]
                 _predict_list.append(_individual_prediction)
 
                 # Only take the rest of the words if it won't cause us to go over the prediction cap.
@@ -121,12 +135,12 @@ class ChunkedGenerator:
                     continue
 
                 for k in range(1, self.k_count):
-                    if _probs[b][i][k] / _top_probability < self.branch_threshold:
+                    if _probs[b][0][k] / _top_probability < self.branch_threshold:
                         # Predictions are sorted by probability. If this one doesn't make the cut, none of the following
                         # ones will.
                         break
                     _branched_prediction = _individual_prediction.clone().detach()
-                    _branched_prediction[0][i] = _words[b][i][k]
+                    _branched_prediction[0][i] = _words[b][0][k]
                     _predict_list.append(_branched_prediction)
 
             _predict_tensor = torch.cat(_predict_list)
@@ -181,7 +195,7 @@ def process_csv_line(line):
 DEVICE = "cuda"
 
 # Load model
-output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_trainer_checkpoints/local_title_256_batched_chunks_target_batch_64"
+output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_trainer_checkpoints/chkpt_2000"
 #output_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_xsum/colab_initial_go_12000_batches"
 
 with open(os.path.join(output_dir, "chunk_config.json"), "r") as chunk_cfg:

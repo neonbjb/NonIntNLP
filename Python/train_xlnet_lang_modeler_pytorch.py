@@ -14,7 +14,7 @@ if fp16:
 
 
 class Trainer:
-    def __init__(self, model, chunked_model_config, train_dataloader, val_dataloader, optimizer, scheduler, device="cuda", is_fp16=False, desired_batch_sz=64):
+    def __init__(self, model, chunked_model_config, train_dataloader, val_dataloader, optimizer, scheduler, device="cuda", is_fp16=False, desired_batch_sz=64, do_wandb=False):
         self.model = model
         self.chunked_model_config = chunked_model_config
         self.train_dataloader = train_dataloader
@@ -23,6 +23,7 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device
         self.is_fp16 = is_fp16
+        self.do_wandb = do_wandb
         self.desired_batch_sz = desired_batch_sz
         assert(self.desired_batch_sz % self.chunked_model_config["batch_size"] == 0)
 
@@ -99,10 +100,14 @@ class Trainer:
             _chunk_loss_schedule = []
             _num_chunks = len(_batch["input_ids"])
             _chunks += _num_chunks
+            _chunk_counter = 0
             for _masked_input_ids, _attention_masks, _labels, _perm_mask, _token_type_ids, _target_mapping in zip(
                 _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"],
                 _batch["token_type_ids"], _batch["target_mappings"]
             ):
+                _is_last_chunk = (_chunk_counter == (_num_chunks - 1))
+                _chunk_counter += 1
+
                 # Forward
                 _inputs = {
                     "input_ids": _masked_input_ids.to(self.device),
@@ -116,25 +121,32 @@ class Trainer:
                     _inputs["mems"] = _mems
 
                 __s = time.time()
-                _loss, _logits, _mems = self.model.forward(**_inputs)
+                # Only compute gradients on the last forward() per-chunkset.
+                if _is_last_chunk:
+                    _loss, _logits, _mems = self.model.forward(**_inputs)
+                else:
+                    with torch.no_grad():
+                        _loss, _logits, _mems = self.model.forward(**_inputs)
                 self.forward_times.append(time.time() - __s)
 
                 _chunk_loss_schedule.append(_loss.item())
 
                 # Backwards
-                __s = time.time()
-                if fp16:
-                    with amp.scale_loss(_loss, self.optimizer) as _scaled_loss:
+                # Only compute backwards on the last chunk per chunkset.
+                if _is_last_chunk:
+                    __s = time.time()
+                    if fp16:
+                        with amp.scale_loss(_loss, self.optimizer) as _scaled_loss:
+                            _loss.backward()
+                            backward_time = time.time() - __s
+                    else:
                         _loss.backward()
                         backward_time = time.time() - __s
-                else:
-                    _loss.backward()
-                    backward_time = time.time() - __s
-                if self.is_fp16:
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1)
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
-                self.backward_times.append(backward_time)
+                    if self.is_fp16:
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
+                    self.backward_times.append(backward_time)
 
             # Update weights after all chunks have been processed at an interval to fulfill desired_batch_sz
             _cur_step += 1
@@ -157,7 +169,7 @@ class Trainer:
                 _logs["loss"] = _loss_scalar
                 _logs["learning_rate"] = self.scheduler.get_lr()[0]
                 _logs["optimizer_steps"] = _optimizer_steps
-                if do_wandb:
+                if self.do_wandb:
                     # wandb can fail if the network connection goes down. this shouldn't take down training.
                     try:
                         wandb.log(_logs)
@@ -166,9 +178,9 @@ class Trainer:
                 else:
                     print(_logs)
 
-            if _steps != 0 and _steps % _steps_till_save == 0:
+            if _steps % _steps_till_save == 0:
                 self.save_model("chkpt_%i" % (_steps))
-            if _steps != 0 and _steps % _steps_till_validate == 0:
+            if _steps % _steps_till_validate == 0:
                 self.validate()
 
             _steps += 1
@@ -214,7 +226,7 @@ class Trainer:
             _logs = {}
             _val_loss = _total_loss / _actual_steps
             _logs["val_loss"] = _val_loss
-            if do_wandb:
+            if self.do_wandb:
                 wandb.log(_logs)
             print("Validation loss: " + str(_val_loss))
 
@@ -272,7 +284,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     project_name = args.project_name
-    args = parser.parse_args()
     epochs = args.epochs
     batch_size = args.batch_sz
     input_folder = args.input_folder
@@ -288,7 +299,6 @@ if __name__ == "__main__":
         "starting_lr": start_lr,
         "output_dir": args.output_dir,
         "target_mask_percent": 0.0,
-        "target_mask_cluster_count": 1,
         "text_mask_percentage": 0.0,
         "force_max_len_gen": True,
         "mem_len": 1024,
@@ -309,9 +319,8 @@ if __name__ == "__main__":
         mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
-        target_mask_cluster_count=chunked_model_config["target_mask_cluster_count"],
-        cluster_easing=False,
         target_mapping_labels=True,
+        targets_only_in_last_chunk=True,
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
@@ -323,6 +332,7 @@ if __name__ == "__main__":
         pad_left=True,
         force_max_len_gen=chunked_model_config["force_max_len_gen"],
         target_mapping_labels=True,
+        targets_only_in_last_chunk=True,
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -380,7 +390,7 @@ if __name__ == "__main__":
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
-    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16, desired_batch_sz=6)
+    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16, desired_batch_sz=6, do_wandb=do_wandb)
     model.zero_grad()
     for _ in range(epochs):
         trainer.train_epoch()

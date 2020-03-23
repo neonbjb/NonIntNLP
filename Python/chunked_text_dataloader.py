@@ -34,6 +34,7 @@ class ChunkedTextDataset(Dataset):
     # pad_left=Whether the padding should go on the left or the right.
     # includes_classification=When true, the dataloader will extract a classification token from the data file. This can be used to train critic models.
     # target_mapping_labels=When true, the dataset will output "target_mapping" and the "labels" output will be tied to that, rather than the entire sequence.
+    # targets_only_in_last_chunk=When true, labels will only be put in the last chunk. In this mode, you should forward() the model through the last chunk, then do backprop on that chunk.
     def __init__(
         self,
         data_file: str,
@@ -46,6 +47,7 @@ class ChunkedTextDataset(Dataset):
         pad_left=False,
         includes_classification=False,
         target_mapping_labels=False,
+        targets_only_in_last_chunk=False,
     ):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
@@ -58,11 +60,12 @@ class ChunkedTextDataset(Dataset):
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
         self.includes_classification = includes_classification
         self.target_mapping_labels = target_mapping_labels
+        self.targets_in_last_chunk = targets_only_in_last_chunk
 
         # force_max_len_gen is a constraint of target_mapping_labels. This is because the class that does batching
         # requires that all labels have the same length, and target_mapping_labels forces labels to be of length target_text.
         if target_mapping_labels:
-            assert force_max_len_gen
+            self.force_max_len_gen = True
 
     def process_element(self, text, target, classifier):
         # Tokens represented as 1-hot tensors which will be reused later in this function.
@@ -151,10 +154,12 @@ class ChunkedTextDataset(Dataset):
                 target_masked,
                 self.mask_target_percentage,
             )
-
             # If we are using target_mapping, than the labels will always get exactly the target and nothing else.
             if self.target_mapping_labels:
                 label_append.copy_(target)
+
+            # This tensor is going to be used to mask the entire target for every sequence but the last one when targets_in_last_chunk=True
+            target_all_masked = torch.full(label_append.shape, self.tokenizer.mask_token_id, dtype=torch.long)
 
             # Now append the labels (and masks) per chunk
             input_ids = []
@@ -175,20 +180,27 @@ class ChunkedTextDataset(Dataset):
             for c_text, c_att, c_lab, c_perm in zip(
                 chunked_text, chunked_attention, chunked_labels, chunked_perm_mask
             ):
+                if self.targets_in_last_chunk and len(labels) != num_chunks - 1:
+                    lbl_t = target_all_masked
+                    tar_t = target_all_masked
+                else:
+                    lbl_t = label_append
+                    tar_t = target_masked
+
                 input_ids.append(torch.cat([target, c_text,], dim=0,))
                 attention_mask.append(
                     torch.cat(
                         [torch.ones(target_len, dtype=torch.float), c_att,], dim=0,
                     )
                 )
-                c_text_masked = torch.cat([target_masked, c_text,], dim=0,)
+                c_text_masked = torch.cat([tar_t, c_text,], dim=0,)
                 c_perm_mask = torch.cat([target_permutation, c_perm], dim=-1,)
 
                 if self.target_mapping_labels:
-                    c_lab_full = label_append
+                    c_lab_full = lbl_t
                 else:
                     # Without target_mapping, the labels is the full sequence. Presumably in this case we're using masking so do that too.
-                    c_lab_full = torch.cat([label_append, c_lab,], dim=0,)
+                    c_lab_full = torch.cat([lbl_t, c_lab], dim=0,)
                     # Now we just have to perform full masking.
                     c_text_masked, c_lab_full = self.perform_mask(
                         c_text_masked, self.mask_all_percentage, c_lab_full, input_ids[-1]
@@ -526,7 +538,8 @@ def test_against_real_file(test_file, tokenizer):
         mask_all_percentage=0,
         pad_left=True,
         force_max_len_gen=True,
-        target_mapping_labels=True
+        target_mapping_labels=True,
+        targets_only_in_last_chunk=True,
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
