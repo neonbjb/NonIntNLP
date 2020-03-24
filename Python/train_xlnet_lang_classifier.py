@@ -6,7 +6,7 @@ import os
 import argparse
 import json
 
-from chunked_text_dataloader import ChunkedTextDataset
+from legacy.chunked_text_dataloader import ChunkedTextDataset
 from tqdm import tqdm
 
 fp16 = True

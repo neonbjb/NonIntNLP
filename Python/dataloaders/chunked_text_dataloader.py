@@ -305,10 +305,16 @@ def test_against_real_file(test_file, tokenizer):
         data_file=test_file,
         tokenizer=tokenizer,
         max_chunk_len=256,
-        max_gen_len=32,
+        max_gen_len=80,
         pad_left=True,
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
+
+    total_sum = 0
+    for i in dataset.raw_data:
+        total_sum += i["target"].shape[-1]
+    print(total_sum / len(dataset.raw_data))
+    return
 
     _b_n = 0
     for batch in loader:
@@ -320,50 +326,6 @@ def test_against_real_file(test_file, tokenizer):
         helpful_print_batch(batch, tokenizer)
         perform_tests(batch, chk_sz)
 
-
-# This test applies the dataset rules against some raw text, then attempts to print out the results as the model would
-# see them.
-def test_against_test_set(tokenizer):
-    # Check the actual conversions.
-    def test_enc(str):
-        return torch.tensor(
-            tokenizer.encode(str, add_special_tokens=False), dtype=torch.long
-        )
-
-    test_set = [
-        {
-            "text": test_enc(
-                "President Donald Trump’s new European travel restrictions have a convenient side effect"
-            ),
-            "target": test_enc("trump is an asshat"),
-        },
-        {
-            "text": test_enc(
-                """
-                Trump is already under fire for visiting his properties in both countries as president, leading to U.S. taxpayer money being spent at his own firms. The president has been saddled with lawsuits and investigations throughout his term alleging that he’s violating the Constitution’s emoluments clause by accepting taxpayer money other than his salary.
-                The U.S. government proclamation initiating the ban targets 26 European countries that comprise a visa-free travel zone known as the Schengen Area.
-                The United Kingdom, which is home to Trump Turnberry and Trump International Golf Links, and Ireland, which is home to another Trump-branded hotel and golf course at Doonbeg, do not participate in the Schengen Area. Bulgaria, Croatia and Romania are also not part of the Schengen Area. All three of the resorts are struggling financially.
-                Ireland’s prime minister, Leo Varadkar, is scheduled to meet Trump at the White House on Thursday in one of the few events related to St. Patrick’s Day that has not been canceled due to coronavirus concerns.
-                The administration’s European travel proclamation notes that “the Schengen Area has exported 201 COVID-19 cases to 53 countries. Moreover, the free flow of people between the Schengen Area countries makes the task of managing the spread of the virus difficult.”
-                Trump’s European travel ban comes with several other loopholes.
-                Though they are subject to border checks on arrival, residents of the 26 Schengen Area countries are also free to live and work in the United Kingdom, meaning they could fly to the United States from a British airport as long as they hadn't spent time within the Schengen countries in the last 14 days.
-                EU leaders condemned Trump's move on Thursday, and disputed the president's criticism of Europe's handling of the crisis.
-                “The Coronavirus is a global crisis, not limited to any continent and it requires cooperation rather than unilateral action,” European Commission President Ursula von der Leyen and European Council President Charles Michel said in a joint statement.
-                """
-            ),
-            "target": test_enc("trump is still an asshat"),
-        },
-    ]
-    torch.save(test_set, "test.pt")
-    dataset = ChunkedTextDataset(data_file="test.pt", tokenizer=tokenizer)
-    loader = dataset.get_dataloader(batch_sz=1)
-    batch_it = 0
-    for batch in loader:
-        print("##########BATCH %i#############" % (batch_it))
-        batch_it += 1
-        helpful_print_batch(batch, tokenizer)
-
-
 if __name__ == "__main__":
     from fluentcheck import Check
 
@@ -371,7 +333,6 @@ if __name__ == "__main__":
 
     # Provided for testing.
     test_file = (
-        "C:\\Users\\jbetk\\Documents\\data\\ml\\title_prediction\\outputs\\val.pt"
+        "C:\\Users\\jbetk\\Documents\\data\\ml\\xsum\\xsum-extracts-from-downloads\\outputs\\val.pt"
     )
     test_against_real_file(test_file, tokenizer)
-    # test_against_test_set(tokenizer)
