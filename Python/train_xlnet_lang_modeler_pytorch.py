@@ -5,7 +5,7 @@ import time
 import os
 import argparse
 import json
-from chunked_text_dataloader import ChunkedTextDataset
+from dataloaders.chunked_text_dataloader import ChunkedTextDataset
 from tqdm import tqdm
 
 fp16 = True
@@ -97,13 +97,16 @@ class Trainer:
 
             _mems = None
             _loss = None
-            _chunk_loss_schedule = []
             _num_chunks = len(_batch["input_ids"])
             _chunks += _num_chunks
             _chunk_counter = 0
-            for _masked_input_ids, _attention_masks, _labels, _perm_mask, _token_type_ids, _target_mapping in zip(
-                _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"],
-                _batch["token_type_ids"], _batch["target_mappings"]
+
+            # Labels are not chunked.
+            _labels = _batch["labels"]
+
+            for _masked_input_ids, _attention_masks, _perm_mask, _target_mapping in zip(
+                _batch["input_ids"], _batch["attention_masks"], _batch["permutation_masks"],
+                _batch["target_mappings"]
             ):
                 _is_last_chunk = (_chunk_counter == (_num_chunks - 1))
                 _chunk_counter += 1
@@ -112,9 +115,7 @@ class Trainer:
                 _inputs = {
                     "input_ids": _masked_input_ids.to(self.device),
                     "attention_mask": _attention_masks.to(self.device),
-                    "labels": _labels.to(self.device),
                     "perm_mask": _perm_mask.to(self.device),
-                    "token_type_ids": _token_type_ids.to(self.device),
                     "target_mapping": _target_mapping.to(self.device),
                 }
                 if _mems is not None:
@@ -123,13 +124,12 @@ class Trainer:
                 __s = time.time()
                 # Only compute gradients on the last forward() per-chunkset.
                 if _is_last_chunk:
+                    _inputs["labels"] = _labels.to(self.device)
                     _loss, _logits, _mems = self.model.forward(**_inputs)
                 else:
                     with torch.no_grad():
-                        _loss, _logits, _mems = self.model.forward(**_inputs)
+                        _logits, _mems = self.model.forward(**_inputs)
                 self.forward_times.append(time.time() - __s)
-
-                _chunk_loss_schedule.append(_loss.item())
 
                 # Backwards
                 # Only compute backwards on the last chunk per chunkset.
@@ -201,23 +201,34 @@ class Trainer:
                     continue
                 _mems = None
                 _loss = None
-                for _masked_input_ids, _attention_masks, _labels, _perm_mask, _token_type_ids, _target_mapping in zip(
-                    _batch["input_ids_masked"], _batch["attention_masks"], _batch["labels"], _batch["permutation_masks"],
-                    _batch["token_type_ids"], _batch["target_mappings"]
+
+                # Labels are not chunked.
+                _labels = _batch["labels"]
+
+                _num_chunks = len(_batch["input_ids"])
+                _chunk_counter = 0
+                for _masked_input_ids, _attention_masks, _perm_mask, _target_mapping in zip(
+                    _batch["input_ids"], _batch["attention_masks"], _batch["permutation_masks"],
+                    _batch["target_mappings"]
                 ):
+                    _is_last_chunk = (_chunk_counter == (_num_chunks - 1))
+
                     # Forward
                     _inputs = {
                         "input_ids": _masked_input_ids.to(self.device),
                         "attention_mask": _attention_masks.to(self.device),
-                        "labels": _labels.to(self.device),
                         "perm_mask": _perm_mask.to(self.device),
-                        "token_type_ids": _token_type_ids.to(self.device),
                         "target_mapping": _target_mapping.to(self.device),
                     }
                     if _mems is not None:
                         _inputs["mems"] = _mems
 
-                    _loss, _logits, _mems = self.model.forward(**_inputs)
+                    if _is_last_chunk:
+                        _inputs["labels"] = _labels.to(self.device)
+                        _loss, _logits, _mems = self.model.forward(**_inputs)
+                    else:
+                        _logits, _mems = self.model.forward(**_inputs)
+                    _chunk_counter += 1
 
                 # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
                 _actual_steps += 1
@@ -298,9 +309,6 @@ if __name__ == "__main__":
         "batch_size": batch_size,
         "starting_lr": start_lr,
         "output_dir": args.output_dir,
-        "target_mask_percent": 0.0,
-        "text_mask_percentage": 0.0,
-        "force_max_len_gen": True,
         "mem_len": 1024,
     }
 
@@ -315,24 +323,14 @@ if __name__ == "__main__":
         tokenizer,
         chunked_model_config["max_seq_len"],
         chunked_model_config["predict_len"],
-        mask_target_percentage=chunked_model_config["target_mask_percent"],
-        mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
-        force_max_len_gen=chunked_model_config["force_max_len_gen"],
-        target_mapping_labels=True,
-        targets_only_in_last_chunk=True,
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
         tokenizer,
         chunked_model_config["max_seq_len"],
         chunked_model_config["predict_len"],
-        mask_target_percentage=chunked_model_config["target_mask_percent"],
-        mask_all_percentage=chunked_model_config["text_mask_percentage"],
         pad_left=True,
-        force_max_len_gen=chunked_model_config["force_max_len_gen"],
-        target_mapping_labels=True,
-        targets_only_in_last_chunk=True,
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -394,8 +392,6 @@ if __name__ == "__main__":
     model.zero_grad()
     for _ in range(epochs):
         trainer.train_epoch()
-        # Slowly increase the mask percentage per epoch to make the model have to work harder.
-        train_set.mask_target_percentage += 0.1
 
     trainer.validate()
     trainer.save_model("final")
