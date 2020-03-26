@@ -73,14 +73,15 @@ class Trainer:
         print("Save completed. %s" % (_output_dir))
 
 
-    def train_epoch(self):
+    def loop(self, _validate=False, _skip_batches=1):
         _logging_steps = 5
         _steps_till_save = 2000
         _steps_till_validate = 2000
 
         self.clear_timers()
 
-        _epoch_iterator = tqdm(self.train_dataloader, desc="Train Iteration")
+        _dataloader = self.val_dataloader if _validate else self.train_dataloader
+        _epoch_iterator = tqdm(_dataloader, desc="Val Iteration" if _validate else "Train Iteration")
         _steps, _optimizer_steps = 0, 0
         _tr_loss, _logging_loss = 0, 0
         _chunks = 0
@@ -91,8 +92,16 @@ class Trainer:
         _batches_required_for_desired_sz = int(self.desired_batch_sz / self.chunked_model_config["batch_size"])
         _cur_step = 0
 
+        if _validate:
+            torch.set_grad_enabled(False)
+            model.eval()
+
         __s = time.time()
         for _step, _batch in enumerate(_epoch_iterator):
+            # Skip batches if necessary. Usually set during validation to speed it up.
+            if _step % _skip_batches != 0:
+                continue
+
             self.preprocess_times.append(time.time() - __s)
 
             _mems = None
@@ -133,7 +142,7 @@ class Trainer:
 
                 # Backwards
                 # Only compute backwards on the last chunk per chunkset.
-                if _is_last_chunk:
+                if not _validate and _is_last_chunk:
                     __s = time.time()
                     if fp16:
                         with amp.scale_loss(_loss, self.optimizer) as _scaled_loss:
@@ -148,9 +157,9 @@ class Trainer:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
                     self.backward_times.append(backward_time)
 
-            # Update weights after all chunks have been processed at an interval to fulfill desired_batch_sz
             _cur_step += 1
-            if _cur_step % _batches_required_for_desired_sz == 0:
+            if not _validate and _cur_step % _batches_required_for_desired_sz == 0:
+                # Update weights after all chunks have been processed at an interval to fulfill desired_batch_sz
                 __s = time.time()
                 self.optimizer.step()
                 self.opt_times.append(time.time() - __s)
@@ -160,15 +169,16 @@ class Trainer:
 
             # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
             _tr_loss += _loss.item()
-            if _steps % _logging_steps == 0:
+            if not _validate and _steps % _logging_steps == 0:
                 _loss_scalar = (_tr_loss - _logging_loss) / _logging_steps
                 _logging_loss = _tr_loss
-                _logs = {}
-                _logs["avg_chunks"] = _chunks / _logging_steps
+                _logs = {
+                    "avg_chunks": _chunks / _logging_steps,
+                    "loss": _loss_scalar,
+                    "learning_rate": self.scheduler.get_lr()[0],
+                    "optimizer_steps": _optimizer_steps
+                }
                 _chunks = 0
-                _logs["loss"] = _loss_scalar
-                _logs["learning_rate"] = self.scheduler.get_lr()[0]
-                _logs["optimizer_steps"] = _optimizer_steps
                 if self.do_wandb:
                     # wandb can fail if the network connection goes down. this shouldn't take down training.
                     try:
@@ -178,69 +188,27 @@ class Trainer:
                 else:
                     print(_logs)
 
-            if _steps % _steps_till_save == 0:
-                self.save_model("chkpt_%i" % (_steps))
-            if _steps % _steps_till_validate == 0:
-                self.validate()
+            # The train loop automatically runs a validation loop and saves checkpoints.
+            if not _validate:
+                if _steps % _steps_till_save == 0:
+                    self.save_model("chkpt_%i" % (_steps))
+                if _steps % _steps_till_validate == 0:
+                    self.loop(_validate=True, _skip_batches=10)
 
             _steps += 1
             # Record time so we see how long it takes to fetch a batch.
             __s = time.time()
 
+        if _validate:
+            torch.set_grad_enabled(True)
+            model.train()
 
-    def validate(self):
-        _epoch_iterator = tqdm(self.val_dataloader, desc="Validation Iteration")
-        _actual_steps = 0
-        _total_loss = 0
-
-        with torch.no_grad():
-            for _step, _batch in enumerate(_epoch_iterator):
-                # Skip 1 in 10 steps, because the validator just takes too long otherwise. It's not as easy as just cutting
-                # down the dataset, either, since we run into chunk/batch size mismatches then.
-                if _step % 10 != 0:
-                    continue
-                _mems = None
-                _loss = None
-
-                # Labels are not chunked.
-                _labels = _batch["labels"]
-
-                _num_chunks = len(_batch["input_ids"])
-                _chunk_counter = 0
-                for _masked_input_ids, _attention_masks, _perm_mask, _target_mapping in zip(
-                    _batch["input_ids"], _batch["attention_masks"], _batch["permutation_masks"],
-                    _batch["target_mappings"]
-                ):
-                    _is_last_chunk = (_chunk_counter == (_num_chunks - 1))
-
-                    # Forward
-                    _inputs = {
-                        "input_ids": _masked_input_ids.to(self.device),
-                        "attention_mask": _attention_masks.to(self.device),
-                        "perm_mask": _perm_mask.to(self.device),
-                        "target_mapping": _target_mapping.to(self.device),
-                    }
-                    if _mems is not None:
-                        _inputs["mems"] = _mems
-
-                    if _is_last_chunk:
-                        _inputs["labels"] = _labels.to(self.device)
-                        _loss, _logits, _mems = self.model.forward(**_inputs)
-                    else:
-                        _logits, _mems = self.model.forward(**_inputs)
-                    _chunk_counter += 1
-
-                # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
-                _actual_steps += 1
-                _total_loss += _loss.item()
-
-            _logs = {}
-            _val_loss = _total_loss / _actual_steps
-            _logs["val_loss"] = _val_loss
+            _logs = {
+                "val_loss": _tr_loss / _cur_step
+            }
             if self.do_wandb:
                 wandb.log(_logs)
-            print("Validation loss: " + str(_val_loss))
-
+            print("Validation loss: " + str(_logs["val_loss"]))
 
 if __name__ == "__main__":
     run_name = input("Enter a name for this run..")
@@ -256,6 +224,7 @@ if __name__ == "__main__":
         help="Project name for wandb",
     )
     parser.add_argument("--batch_sz", type=int, default=3, help="Batch size")
+    parser.add_argument("--aggregate_batch_sz", type=int, default=3, help="Batches are accumulated to this number before optimizer.step() is called. Must be a multiple of batch_sz.")
     parser.add_argument(
         "--seq_sz", type=int, default=256, help="Sequence size to be fed into the model"
     )
@@ -297,8 +266,11 @@ if __name__ == "__main__":
     project_name = args.project_name
     epochs = args.epochs
     batch_size = args.batch_sz
+    aggregate_batch_size = args.aggregate_batch_sz
+    assert(aggregate_batch_size % batch_size == 0)
     input_folder = args.input_folder
     torch_device_name = args.device
+
     start_lr = args.start_lr
 
     chunked_model_config = {
@@ -377,9 +349,7 @@ if __name__ == "__main__":
     scheduler = transformers.get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=0,
-        # '5' a tad bit higher than the average number of chunks,
-        #  each of which will get a train step.
-        num_training_steps=epochs * len(train_set) * 5 / batch_size,
+        num_training_steps=epochs * len(train_set) / aggregate_batch_size,
     )
 
     # Shift model to device & enable fp16 if applicable.
@@ -388,10 +358,11 @@ if __name__ == "__main__":
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
-    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16, desired_batch_sz=6, do_wandb=do_wandb)
+    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16,
+                      desired_batch_sz=aggregate_batch_size, do_wandb=do_wandb)
     model.zero_grad()
     for _ in range(epochs):
-        trainer.train_epoch()
+        trainer.loop()
 
-    trainer.validate()
+    trainer.loop(_validate=True, _skip_batches=10)
     trainer.save_model("final")
