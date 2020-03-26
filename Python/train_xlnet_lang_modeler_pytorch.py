@@ -85,31 +85,34 @@ class Trainer:
         print("Save completed. %s" % (_output_dir))
 
     def loop(self, _validate=False, _skip_batches=1):
+        # How many steps per logging event.
         _logging_steps = 5
+        # How many steps between checkpoint save and validation.
         _steps_till_save = 2000
         _steps_till_validate = 2000
 
-        self.clear_timers()
-
         _dataloader = self.val_dataloader if _validate else self.train_dataloader
         _epoch_iterator = tqdm(
-            _dataloader, desc="Val Iteration" if _validate else "Train Iteration"
-        )
+            _dataloader, desc="Val Iteration" if _validate else "Train Iteration")
+
+        # Total batches processed and number of times optimizer.step() has been called.
         _steps, _optimizer_steps = 0, 0
-        _tr_loss, _logging_loss = 0, 0
+        # Aggregate losses.
+        _loss_sum, _logging_loss = 0, 0
         _chunks = 0
-        _accuracy_accum, _accuracy_last = 0, 0
-        self.model.train()
+        self.clear_timers()
+
 
         # This controls how many batches are required per optimizer step.
         _batches_required_for_desired_sz = int(
             self.desired_batch_sz / self.chunked_model_config["batch_size"]
         )
-        _cur_step = 0
 
         if _validate:
             torch.set_grad_enabled(False)
             model.eval()
+        else:
+            self.model.train()
 
         __s = time.time()
         for _step, _batch in enumerate(_epoch_iterator):
@@ -176,8 +179,7 @@ class Trainer:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
                     self.backward_times.append(backward_time)
 
-            _cur_step += 1
-            if not _validate and _cur_step % _batches_required_for_desired_sz == 0:
+            if not _validate and _step % _batches_required_for_desired_sz == 0:
                 # Update weights after all chunks have been processed at an interval to fulfill desired_batch_sz
                 __s = time.time()
                 self.optimizer.step()
@@ -187,10 +189,10 @@ class Trainer:
                 _optimizer_steps += 1
 
             # Always accumulate loss across the last chunk, where it should be lowest. That's the goal of this model.
-            _tr_loss += _loss.item()
+            _loss_sum += _loss.item()
             if not _validate and _steps % _logging_steps == 0:
-                _loss_scalar = (_tr_loss - _logging_loss) / _logging_steps
-                _logging_loss = _tr_loss
+                _loss_scalar = (_loss_sum - _logging_loss) / _logging_steps
+                _logging_loss = _loss_sum
                 _logs = {
                     "avg_chunks": _chunks / _logging_steps,
                     "loss": _loss_scalar,
@@ -218,11 +220,12 @@ class Trainer:
             # Record time so we see how long it takes to fetch a batch.
             __s = time.time()
 
+        # Undo all the state changes needed for validation and perform validation logging.
         if _validate:
             torch.set_grad_enabled(True)
             model.train()
 
-            _logs = {"val_loss": _tr_loss / _cur_step}
+            _logs = {"val_loss": _loss_sum / _steps}
             if self.do_wandb:
                 wandb.log(_logs)
             print("Validation loss: " + str(_logs["val_loss"]))
