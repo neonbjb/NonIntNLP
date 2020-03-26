@@ -14,7 +14,19 @@ if fp16:
 
 
 class Trainer:
-    def __init__(self, model, chunked_model_config, train_dataloader, val_dataloader, optimizer, scheduler, device="cuda", is_fp16=False, desired_batch_sz=64, do_wandb=False):
+    def __init__(
+        self,
+        model,
+        chunked_model_config,
+        train_dataloader,
+        val_dataloader,
+        optimizer,
+        scheduler,
+        device="cuda",
+        is_fp16=False,
+        desired_batch_sz=64,
+        do_wandb=False,
+    ):
         self.model = model
         self.chunked_model_config = chunked_model_config
         self.train_dataloader = train_dataloader
@@ -25,7 +37,7 @@ class Trainer:
         self.is_fp16 = is_fp16
         self.do_wandb = do_wandb
         self.desired_batch_sz = desired_batch_sz
-        assert(self.desired_batch_sz % self.chunked_model_config["batch_size"] == 0)
+        assert self.desired_batch_sz % self.chunked_model_config["batch_size"] == 0
 
         self.preprocess_times = []
         self.forward_times = []
@@ -72,7 +84,6 @@ class Trainer:
         self.model.save_pretrained(_output_dir)
         print("Save completed. %s" % (_output_dir))
 
-
     def loop(self, _validate=False, _skip_batches=1):
         _logging_steps = 5
         _steps_till_save = 2000
@@ -81,7 +92,9 @@ class Trainer:
         self.clear_timers()
 
         _dataloader = self.val_dataloader if _validate else self.train_dataloader
-        _epoch_iterator = tqdm(_dataloader, desc="Val Iteration" if _validate else "Train Iteration")
+        _epoch_iterator = tqdm(
+            _dataloader, desc="Val Iteration" if _validate else "Train Iteration"
+        )
         _steps, _optimizer_steps = 0, 0
         _tr_loss, _logging_loss = 0, 0
         _chunks = 0
@@ -89,7 +102,9 @@ class Trainer:
         self.model.train()
 
         # This controls how many batches are required per optimizer step.
-        _batches_required_for_desired_sz = int(self.desired_batch_sz / self.chunked_model_config["batch_size"])
+        _batches_required_for_desired_sz = int(
+            self.desired_batch_sz / self.chunked_model_config["batch_size"]
+        )
         _cur_step = 0
 
         if _validate:
@@ -114,10 +129,12 @@ class Trainer:
             _labels = _batch["labels"]
 
             for _masked_input_ids, _attention_masks, _perm_mask, _target_mapping in zip(
-                _batch["input_ids"], _batch["attention_masks"], _batch["permutation_masks"],
-                _batch["target_mappings"]
+                _batch["input_ids"],
+                _batch["attention_masks"],
+                _batch["permutation_masks"],
+                _batch["target_mappings"],
             ):
-                _is_last_chunk = (_chunk_counter == (_num_chunks - 1))
+                _is_last_chunk = _chunk_counter == (_num_chunks - 1)
                 _chunk_counter += 1
 
                 # Forward
@@ -152,7 +169,9 @@ class Trainer:
                         _loss.backward()
                         backward_time = time.time() - __s
                     if self.is_fp16:
-                        torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1)
+                        torch.nn.utils.clip_grad_norm_(
+                            amp.master_params(self.optimizer), 1
+                        )
                     else:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
                     self.backward_times.append(backward_time)
@@ -176,7 +195,7 @@ class Trainer:
                     "avg_chunks": _chunks / _logging_steps,
                     "loss": _loss_scalar,
                     "learning_rate": self.scheduler.get_lr()[0],
-                    "optimizer_steps": _optimizer_steps
+                    "optimizer_steps": _optimizer_steps,
                 }
                 _chunks = 0
                 if self.do_wandb:
@@ -203,12 +222,11 @@ class Trainer:
             torch.set_grad_enabled(True)
             model.train()
 
-            _logs = {
-                "val_loss": _tr_loss / _cur_step
-            }
+            _logs = {"val_loss": _tr_loss / _cur_step}
             if self.do_wandb:
                 wandb.log(_logs)
             print("Validation loss: " + str(_logs["val_loss"]))
+
 
 if __name__ == "__main__":
     run_name = input("Enter a name for this run..")
@@ -224,7 +242,12 @@ if __name__ == "__main__":
         help="Project name for wandb",
     )
     parser.add_argument("--batch_sz", type=int, default=3, help="Batch size")
-    parser.add_argument("--aggregate_batch_sz", type=int, default=3, help="Batches are accumulated to this number before optimizer.step() is called. Must be a multiple of batch_sz.")
+    parser.add_argument(
+        "--aggregate_batch_sz",
+        type=int,
+        default=3,
+        help="Batches are accumulated to this number before optimizer.step() is called. Must be a multiple of batch_sz.",
+    )
     parser.add_argument(
         "--seq_sz", type=int, default=256, help="Sequence size to be fed into the model"
     )
@@ -259,7 +282,10 @@ if __name__ == "__main__":
         "--start_lr", type=float, default=2e-5, help="Learning rate to start at."
     )
     parser.add_argument(
-        "--output_dir", type=str, default=".", help="Directory where checkpoints saves will be made."
+        "--output_dir",
+        type=str,
+        default=".",
+        help="Directory where checkpoints saves will be made.",
     )
     args = parser.parse_args()
 
@@ -267,7 +293,7 @@ if __name__ == "__main__":
     epochs = args.epochs
     batch_size = args.batch_sz
     aggregate_batch_size = args.aggregate_batch_sz
-    assert(aggregate_batch_size % batch_size == 0)
+    assert aggregate_batch_size % batch_size == 0
     input_folder = args.input_folder
     torch_device_name = args.device
 
@@ -358,8 +384,18 @@ if __name__ == "__main__":
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
-    trainer = Trainer(model, chunked_model_config, train_loader, val_loader, optimizer, scheduler, device, fp16,
-                      desired_batch_sz=aggregate_batch_size, do_wandb=do_wandb)
+    trainer = Trainer(
+        model,
+        chunked_model_config,
+        train_loader,
+        val_loader,
+        optimizer,
+        scheduler,
+        device,
+        fp16,
+        desired_batch_sz=aggregate_batch_size,
+        do_wandb=do_wandb,
+    )
     model.zero_grad()
     for _ in range(epochs):
         trainer.loop()
