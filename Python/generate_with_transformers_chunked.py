@@ -6,10 +6,11 @@ import json
 import random
 
 # Some constants to quickly tweak what/how this script works.
-NUMBER_TO_GENERATE = 5
+NUMBER_TO_GENERATE = 50
 DEVICE = "cuda"
-model_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_trainer_checkpoints/chkpt_26000"
-data_file = "C:/Users/jbetk/Documents/data/ml/title_prediction/outputs/test.pt"
+model_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_trainer_checkpoints/xsum_prediction_perm_batchsz_24_6000"
+#data_file = "C:/Users/jbetk/Documents/data/ml/title_prediction/outputs/test.pt"
+data_file = "C:/Users/jbetk/Documents/data/ml/xsum/xsum-extracts-from-downloads/outputs/test.pt"
 
 # Load the chunk config. This is saved alongside the model if it was trained using train_xlnet_lang_modeler
 # and saves some of the configuration options used to train the model which are also useful for generation.
@@ -69,16 +70,26 @@ for i in range(NUMBER_TO_GENERATE):
     prompt_inputs = prompt_inputs.unsqueeze(dim=0)  # generate() expects batched inputs.
 
     # Use the transformers generate function to do the actual generation now.
-    genned_results = model.generate(prompt_inputs, max_length=chunk_seq_len,
-                   do_sample=True,
-                   num_beams=7,
-                   temperature=.7,
-                   top_k=0,
-                   top_p=.9,
-                   repetition_penalty=5,
-                   eos_token_ids=tokenizer.eos_token_id,
-                   num_return_sequences=5,
-                   mems=mems)
+    do_sampling = False
+    if do_sampling:
+        genned_results = model.generate(prompt_inputs, max_length=chunk_seq_len,
+                       do_sample=True,
+                       num_beams=7,
+                       temperature=.7,
+                       top_k=0,
+                       top_p=.9,
+                       repetition_penalty=5,
+                       eos_token_ids=tokenizer.eos_token_id,
+                       num_return_sequences=5,
+                       mems=mems)
+    else:
+        genned_results = model.generate(prompt_inputs, max_length=chunk_seq_len,
+                       do_sample=False,
+                       num_beams=12,
+                       repetition_penalty=5,
+                       eos_token_ids=tokenizer.eos_token_id,
+                       num_return_sequences=2,
+                       mems=mems)
 
     # Append results here.
     seqs, _ = genned_results.shape
