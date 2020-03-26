@@ -4,13 +4,48 @@ from dataloaders.chunked_text_dataloader import ChunkedTextDataset
 import os
 import json
 import random
+import argparse
 
-# Some constants to quickly tweak what/how this script works.
-NUMBER_TO_GENERATE = 50
-DEVICE = "cuda"
-model_dir = "C:/Users/jbetk/Documents/data/ml/saved_models/xlnet_trainer_checkpoints/xsum_prediction_perm_batchsz_24_6000"
-#data_file = "C:/Users/jbetk/Documents/data/ml/title_prediction/outputs/test.pt"
-data_file = "C:/Users/jbetk/Documents/data/ml/xsum/xsum-extracts-from-downloads/outputs/test.pt"
+parser = argparse.ArgumentParser(
+    description="Train an auto-regressive transformer model."
+)
+parser.add_argument(
+    "--model_dir",
+    type=str,
+    required=True,
+    help="Where to load the saved transformers model from. This is also where the output is written to.",
+)
+parser.add_argument(
+    "--data_file",
+    type=str,
+    required=True,
+    help="The test data file to use for generation. Should be loadable by chunked_text_dataloader.",
+)
+parser.add_argument(
+    "--number_to_generate",
+    type=int,
+    default=5,
+    help="The number of test_data rows to pull and generate from.",
+)
+parser.add_argument(
+    "--device",
+    type=str,
+    default="cuda",
+    help="The device to use for generation.",
+)
+parser.add_argument(
+    "--do_sampling",
+    type=bool,
+    default=False,
+    help="The device to use for generation.",
+)
+args = parser.parse_args()
+
+number_to_generate = args.number_to_generate
+device_str = args.device
+model_dir = args.model_dir
+data_file = args.data_file
+do_sampling = args.do_sampling
 
 # Load the chunk config. This is saved alongside the model if it was trained using train_xlnet_lang_modeler
 # and saves some of the configuration options used to train the model which are also useful for generation.
@@ -37,11 +72,11 @@ test_set = ChunkedTextDataset(
 )
 
 random.seed(12345)
-device = torch.device(DEVICE)
+device = torch.device(device_str)
 model.to(device)
 results = { "meta": chunk_config,
             "results": []}
-for i in range(NUMBER_TO_GENERATE):
+for i in range(number_to_generate):
     chunked_data = test_set[random.randint(0, len(test_set)-1)]
     full_text = []
 
@@ -70,7 +105,6 @@ for i in range(NUMBER_TO_GENERATE):
     prompt_inputs = prompt_inputs.unsqueeze(dim=0)  # generate() expects batched inputs.
 
     # Use the transformers generate function to do the actual generation now.
-    do_sampling = False
     if do_sampling:
         genned_results = model.generate(prompt_inputs, max_length=chunk_seq_len,
                        do_sample=True,
