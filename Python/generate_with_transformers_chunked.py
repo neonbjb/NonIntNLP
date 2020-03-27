@@ -113,7 +113,7 @@ for i in range(number_to_generate):
             top_k=0,
             top_p=0.9,
             repetition_penalty=5,
-            eos_token_ids=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             num_return_sequences=5,
             mems=mems,
         )
@@ -124,7 +124,7 @@ for i in range(number_to_generate):
             do_sample=False,
             num_beams=12,
             repetition_penalty=5,
-            eos_token_ids=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             num_return_sequences=1,
             mems=mems,
         )
