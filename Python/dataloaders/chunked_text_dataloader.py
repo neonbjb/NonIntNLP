@@ -296,7 +296,7 @@ def perform_tests(batch, chk_sz):
             inputs = batch["input_ids"][c][b]
             mask = batch["attention_masks"][c][b]
             perm_mask = batch["permutation_masks"][c][b]
-            Check(perm_mask.shape).equals((len(ii), len(ii)))
+            Check(perm_mask.shape).equals((len(inputs), len(inputs)))
 
 
 def test_against_real_file(test_file, tokenizer):
@@ -309,12 +309,6 @@ def test_against_real_file(test_file, tokenizer):
         pad_left=True,
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
-
-    total_sum = 0
-    for i in dataset.raw_data:
-        total_sum += i["target"].shape[-1]
-    print(total_sum / len(dataset.raw_data))
-    return
 
     _b_n = 0
     for batch in loader:
