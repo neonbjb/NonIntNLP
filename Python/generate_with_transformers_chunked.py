@@ -53,7 +53,6 @@ tokenizer = transformers.XLNetTokenizer.from_pretrained(chunk_config["model_name
 config = transformers.XLNetConfig.from_pretrained(chunk_config["model_name"])
 config.mem_len = chunk_config["mem_len"]
 model = transformers.XLNetLMHeadModel.from_pretrained(model_dir, config=config)
-model.eval()
 
 # Load the dataset for the file specified above. This class is the same one used during training to perform chunking
 # and some preprocessing.
@@ -68,6 +67,8 @@ test_set = ChunkedTextDataset(
 random.seed(12345)
 device = torch.device(device_str)
 model.to(device)
+model.eval()
+torch.set_grad_enabled(False)
 results = {"meta": chunk_config, "results": []}
 for i in range(number_to_generate):
     chunked_data = test_set[random.randint(0, len(test_set) - 1)]
@@ -91,8 +92,8 @@ for i in range(number_to_generate):
         }
         if mems is not None:
             model_inputs["mems"] = mems
-        with torch.no_grad():
-            logits, mems = model.forward(**model_inputs)
+
+        logits, mems = model.forward(**model_inputs)
 
     # Now get the input IDs minus the target* for the last chunk. This will serve as the "prompt" for the model.
     text_len = chunk_seq_len - target_pred_max_len
@@ -107,7 +108,7 @@ for i in range(number_to_generate):
             prompt_inputs,
             max_length=chunk_seq_len,
             do_sample=True,
-            num_beams=7,
+            num_beams=4,
             temperature=0.7,
             top_k=0,
             top_p=0.9,
@@ -124,7 +125,7 @@ for i in range(number_to_generate):
             num_beams=12,
             repetition_penalty=5,
             eos_token_ids=tokenizer.eos_token_id,
-            num_return_sequences=2,
+            num_return_sequences=1,
             mems=mems,
         )
 
