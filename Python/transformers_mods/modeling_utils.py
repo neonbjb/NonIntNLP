@@ -1045,17 +1045,17 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
 
             # repetition penalty from CTRL paper (https://arxiv.org/abs/1909.05858)
             if repetition_penalty != 1.0:
-                self.enforce_repetition_penalty_(next_token_logits, batch_size, 1, input_ids, repetition_penalty)
+                self.enforce_repetition_penalty_(next_token_logits, batch_size, 1, input_ids[:, starting_index:], repetition_penalty)
 
             if no_repeat_ngram_size > 0:
                 # calculate a list of banned tokens to prevent repetitively generating the same ngrams
                 # from fairseq: https://github.com/pytorch/fairseq/blob/a07cb6f40480928c9e0548b737aadd36ee66ac76/fairseq/sequence_generator.py#L345
-                banned_tokens = calc_banned_tokens(input_ids, batch_size, no_repeat_ngram_size, cur_len)
+                banned_tokens = calc_banned_tokens(input_ids, batch_size, no_repeat_ngram_size, prediction_index)
                 for batch_idx in range(batch_size):
                     next_token_logits[batch_idx, banned_tokens[batch_idx]] = -float("inf")
 
             # set eos token prob to zero if min_length is not reached
-            if eos_token_id is not None and cur_len < min_length:
+            if eos_token_id is not None and prediction_index < min_length:
                 next_token_logits[:, eos_token_id] = -float("inf")
 
             if do_sample:
@@ -1084,7 +1084,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                 eos_in_sents = tokens_to_add == eos_token_id
                 # if sentence is unfinished and the token to add is eos, sent_lengths is filled with current length
                 is_sents_unfinished_and_token_to_add_is_eos = unfinished_sents.mul(eos_in_sents.long()).bool()
-                sent_lengths.masked_fill_(is_sents_unfinished_and_token_to_add_is_eos, cur_len + 1)
+                sent_lengths.masked_fill_(is_sents_unfinished_and_token_to_add_is_eos, prediction_index + 1)
                 # unfinished_sents is set to zero if eos in sentence
                 unfinished_sents.mul_((~eos_in_sents).long())
 
@@ -1098,7 +1098,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                     [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
                 )
 
-            cur_len = cur_len + 1
+            prediction_index = prediction_index + 1
 
         # if there are different sentences lengths in the batch, some batches have to be padded
         if sent_lengths.min().item() != sent_lengths.max().item():
@@ -1175,7 +1175,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                     shaped_mems.append(m.expand((m.shape[0], bs,) + m.shape[2:]))
                 model_inputs["mems"] = shaped_mems
 
-            outputs = self(**model_inputs)  # (batch_size * num_beams, cur_len, vocab_size)
+            outputs = self(**model_inputs)  # (batch_size * num_beams, prediction_index, vocab_size)
             next_token_logits = outputs[0][:, -1, :]  # (batch_size * num_beams, vocab_size)
 
             # if model has past, then set the past variable to speed up decoding
@@ -1185,7 +1185,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             # repetition penalty (from CTRL paper https://arxiv.org/abs/1909.05858)
             if repetition_penalty != 1.0:
                 self.enforce_repetition_penalty_(
-                    next_token_logits, batch_size, num_beams, input_ids, repetition_penalty,
+                    next_token_logits, batch_size, num_beams, input_ids[:, starting_index:], repetition_penalty,
                 )
 
             if temperature != 1.0:
@@ -1194,10 +1194,10 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             scores = F.log_softmax(next_token_logits, dim=-1)  # (batch_size * num_beams, vocab_size)
             if self.config.is_encoder_decoder and do_sample is False:
                 # TODO (PVP) still a bit hacky here - there might be a better solutino
-                scores = self.prepare_scores_for_generation(scores, cur_len=cur_len, max_length=max_length)
+                scores = self.prepare_scores_for_generation(scores, cur_len=prediction_index, max_length=max_length)
 
             # set eos token prob to zero if min_length is not reached
-            if eos_token_id is not None and cur_len < min_length:
+            if eos_token_id is not None and prediction_index < min_length:
                 scores[:, eos_token_id] = -float("inf")
 
             if no_repeat_ngram_size > 0:
@@ -1205,7 +1205,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                 num_batch_hypotheses = batch_size * num_beams
                 # from fairseq: https://github.com/pytorch/fairseq/blob/a07cb6f40480928c9e0548b737aadd36ee66ac76/fairseq/sequence_generator.py#L345
                 banned_batch_tokens = calc_banned_tokens(
-                    input_ids, num_batch_hypotheses, no_repeat_ngram_size, cur_len
+                    input_ids, num_batch_hypotheses, no_repeat_ngram_size, prediction_index
                 )
                 for i, banned_tokens in enumerate(banned_batch_tokens):
                     scores[i, banned_tokens] = -float("inf")
@@ -1295,7 +1295,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
 
                 # Check if were done so that we can save a pad step if all(done)
                 done[batch_idx] = done[batch_idx] or generated_hyps[batch_idx].is_done(
-                    next_scores[batch_idx].max().item(), cur_len=cur_len
+                    next_scores[batch_idx].max().item(), cur_len=prediction_index
                 )
 
                 # update next beam content
@@ -1328,7 +1328,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                 )
 
             # update current length
-            cur_len = cur_len + 1
+            prediction_index = prediction_index + 1
 
         # finalize all open beam hypotheses and end to generated hypotheses
         for batch_idx in range(batch_size):

@@ -24,7 +24,7 @@ parser.add_argument(
 parser.add_argument(
     "--number_to_generate",
     type=int,
-    default=5,
+    default=50,
     help="The number of test_data rows to pull and generate from.",
 )
 parser.add_argument(
@@ -64,7 +64,7 @@ test_set = ChunkedTextDataset(
     pad_left=True,
 )
 
-random.seed(12345)
+#random.seed(12345)
 device = torch.device(device_str)
 model.to(device)
 model.eval()
@@ -125,7 +125,7 @@ for i in range(number_to_generate):
             num_beams=12,
             repetition_penalty=5,
             eos_token_id=tokenizer.eos_token_id,
-            num_return_sequences=1,
+            num_return_sequences=2,
             mems=mems,
         )
 
