@@ -66,7 +66,7 @@ class ChunkedTextDataset(Dataset):
             target_len = self.max_gen_len
 
             # Straight up append the target to the text, with the special tokens in between.
-            text = torch.cat([bos_token_tensor, text, sep_token_tensor, target])
+            text_with_target = torch.cat([bos_token_tensor, text, sep_token_tensor, target])
 
             # Add masks instead of the target to get masked_text.
             target_masks = torch.full((target_len,), self.tokenizer.mask_token_id, dtype=torch.long)
@@ -74,13 +74,13 @@ class ChunkedTextDataset(Dataset):
 
             # Create attention_masks that'll go along with this tokenized text. Ignore the pads in the target because
             # we want the model to predict them.
-            attention_mask = torch.ones(text.shape[0], dtype=torch.float)
+            attention_mask = torch.ones(text_with_target.shape[0], dtype=torch.float)
 
-            # The permutation mask is all 0s for the text; all tokens attend to each other. For the target, our goal is
-            # sequential generation, so the permutation will also be sequential. We won't let the text perform any
+            # The permutation mask is all 0s for the text_with_target; all tokens attend to each other. For the target, our goal is
+            # sequential generation, so the permutation will also be sequential. We won't let the text_with_target perform any
             # attention on the title.
             text_perm_mask = torch.zeros(
-                (self.max_chunk_len, text.shape[0] - target_len), dtype=torch.float
+                (self.max_chunk_len, text_with_target.shape[0] - target_len), dtype=torch.float
             )
             target_perm_mask = torch.ones(
                 (self.max_chunk_len, target_len), dtype=torch.float
@@ -90,19 +90,19 @@ class ChunkedTextDataset(Dataset):
             perm_mask = torch.cat([text_perm_mask, target_perm_mask], dim=-1)
 
             # Build target mappings. These are identical for all chunks - the target is just an eye tensor
-            # up to target_len that is shifted to the end of the text sequence, with zeros placed everywhere.
+            # up to target_len that is shifted to the end of the text_with_target sequence, with zeros placed everywhere.
             target_mapping = torch.eye(target_len, dtype=torch.float)
-            target_mapping_shift = torch.zeros((target_len, text.shape[0] - target_len), dtype=torch.float)
+            target_mapping_shift = torch.zeros((target_len, text_with_target.shape[0] - target_len), dtype=torch.float)
             target_mapping = torch.cat([target_mapping_shift, target_mapping], dim=-1)
 
             # We will chunk all inputs so that none exceed max_chunk_len, which will all be fed into the model
             # sequentially. Lets figure out what the total lengths are first.
-            num_chunks = math.ceil(text.shape[0] / self.max_chunk_len)
+            num_chunks = math.ceil(text_with_target.shape[0] / self.max_chunk_len)
             final_text_seq_len = num_chunks * self.max_chunk_len
 
-            # Before we can feed text into torch.chunk, it needs to be an exact multiple of text_len_per_chunk -
-            # which is final_text_seq_len calculated above. Pad the text to accomplish this.
-            padding_needed = final_text_seq_len - text.shape[0]
+            # Before we can feed text_with_target into torch.chunk, it needs to be an exact multiple of text_len_per_chunk -
+            # which is final_text_seq_len calculated above. Pad the text_with_target to accomplish this.
+            padding_needed = final_text_seq_len - text_with_target.shape[0]
             padding_tensor = torch.full(
                 (padding_needed,),
                 fill_value=self.tokenizer.pad_token_id,
@@ -112,18 +112,20 @@ class ChunkedTextDataset(Dataset):
             perm_padding_tensor = torch.zeros((self.max_chunk_len, padding_needed), dtype=torch.float)
             tar_map_padding_tensor = torch.zeros((target_len, padding_needed), dtype=torch.float)
             if self.pad_left:
-                text = torch.cat([padding_tensor, text], dim=0)
+                text_with_target = torch.cat([padding_tensor, text_with_target], dim=0)
+                text_masked = torch.cat([padding_tensor, text_masked], dim=0)
                 attention_mask = torch.cat([att_padding_tensor, attention_mask], dim=0)
                 perm_mask = torch.cat([perm_padding_tensor, perm_mask], dim=-1)
                 target_mapping = torch.cat([tar_map_padding_tensor, target_mapping], dim=-1)
             else:
-                text = torch.cat([text, padding_tensor], dim=0)
+                text_with_target = torch.cat([text_with_target, padding_tensor], dim=0)
+                text_masked = torch.cat([text_masked, padding_tensor], dim=0)
                 attention_mask = torch.cat([attention_mask, att_padding_tensor], dim=0)
                 perm_mask = torch.cat([perm_mask, perm_padding_tensor], dim=-1)
                 target_mapping = torch.cat([target_mapping, tar_map_padding_tensor], dim=-1)
 
-            chunked_text = torch.chunk(text, chunks=num_chunks)
-            chunked_masked_text = torch.chunk(text, chunks=num_chunks)
+            chunked_text = torch.chunk(text_with_target, chunks=num_chunks)
+            chunked_masked_text = torch.chunk(text_masked, chunks=num_chunks)
             chunked_attention = torch.chunk(attention_mask, chunks=num_chunks)
             chunked_perm_mask = torch.chunk(perm_mask, chunks=num_chunks, dim=-1)
             chunked_target_mapping = torch.chunk(target_mapping, chunks=num_chunks, dim=-1)
