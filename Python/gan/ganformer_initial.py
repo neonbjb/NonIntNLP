@@ -25,6 +25,8 @@ def main():
     ngpu = 1
     # Whether or not to log to w&b
     do_wandb = True
+    # Whether or not to add noise on the masks for the input embeddings fed into the generator.
+    add_noise = False
 
     # new stuff
     model_name = "xlnet-base-cased"
@@ -85,14 +87,14 @@ def main():
         )  # Take care of distributed/parallel training
         sdModel.save_pretrained(chkptD_dir)
     # Validate save_models works.
-    #save_models(0)
+    save_models(0)
 
     # Initialize BCELoss function
     criterion = nn.BCEWithLogitsLoss()
 
     # Establish convention for real and fake labels during training
-    real_label = 1
-    fake_label = 0
+    real_label = torch.ones((batch_size,), dtype=torch.float)
+    fake_label = torch.zeros((batch_size,), dtype=torch.float)
 
     def get_opt_and_sched(model):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -133,8 +135,8 @@ def main():
     # Training Loop
 
     # Lists to keep track of progress
-    img_list = []
     G_losses = []
+    G_lm_losses = []
     D_losses = []
     iters = 0
 
@@ -149,131 +151,138 @@ def main():
         for batch in it:
             num_chunks = len(batch["input_ids"])
 
-            def computeMemsForModel(model):
-                mems = None
-                for c in range(num_chunks-1):
-                    inputs = {
-                        "input_ids": batch["input_ids"][c].to(device),
-                        "attention_mask": batch["attention_masks"][c].to(device),
-                    }
-                    if mems is not None:
-                        inputs["mems"] = mems
-                    with torch.no_grad():
-                        output = model.forward(**inputs)
-                        logits, mems = output[0], output[1]
-                return mems
+            def forward_backward_both_models(batch, chunk, input_label_to_use, memsG, memsD, gen_labels=None,
+                                             disc_labels=None, compute_discriminator_loss=False,
+                                             discriminator_to_generator_loss=False, do_noise=False):
+                _embeddings = netG.get_input_embeddings().forward(batch[input_label_to_use][chunk].to(device))
+                attention_mask = batch["attention_masks"][chunk].to(device)
+                _noise = None
+                if do_noise:
+                    # Generate noise to apply across the <masked> tokens.
+                    noise_magnitude_max = _embeddings.mean() * .1
+                    noise_magnitude_min = _embeddings.mean() * -.1
+                    target_noise = torch.randn((batch_size, max_predict_sz, mem_len), device=device) * (
+                                noise_magnitude_max - noise_magnitude_min) + noise_magnitude_min
+                    text_noise = torch.zeros((batch_size, seq_sz - max_predict_sz, mem_len), device=device)
+                    _noise = torch.cat([text_noise, target_noise], dim=1, device=device)
 
-            # Compute the mems for both the discriminator and the generator.
-            memsD = computeMemsForModel(netD)
-            memsG = computeMemsForModel(netG)
+                g_inputs = {
+                    "inputs_embeds": _embeddings + _noise if _noise is not None else _embeddings,
+                    "attention_mask": attention_mask,
+                    "mems": memsG
+                }
+                if gen_labels is not None:
+                    g_inputs["labels"] = gen_labels.to(device)
+                    lossG, logits, memsG, hidden_states = netG(**g_inputs)
+
+                    # Since a loss was provided, compute backwards as well before going on to the discriminator. This
+                    # forces the gradients to halt at the output of the generator (desired).
+                    with amp.scale_loss(lossG, optimizerG) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        amp.master_params(optimizerG), 1
+                    )
+
+                    # Detach the hidden_state from the generator graph. We don't want the discriminator to backprop into
+                    # the generator.
+                    final_hidden_state = hidden_states[-1].detach()
+                else:
+                    if discriminator_to_generator_loss:
+                        logits, memsG, hidden_states = netG(**g_inputs)
+                        final_hidden_state = hidden_states[-1]
+                    else:
+                        # Do not allow gradients to flow into the generator from the discriminator.
+                        with torch.no_grad():
+                            logits, memsG, hidden_states = netG(**g_inputs)
+                            final_hidden_state = hidden_states[-1]
+
+                d_inputs = {
+                    "inputs_embeds": final_hidden_state,
+                    "attention_mask": attention_mask,
+                    "mems": memsD,
+                }
+                if disc_labels is not None:
+                    d_inputs["labels"] = disc_labels.to(device)
+                    lossD, logits, memsD = netD(**d_inputs)
+
+                    if compute_discriminator_loss:
+                        with amp.scale_loss(lossD, optimizerD) as scaled_loss:
+                            scaled_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            amp.master_params(optimizerD), 1
+                        )
+                else:
+                    with torch.no_grad():
+                        logits, memsD = netD(**d_inputs)
+
+                if discriminator_to_generator_loss:
+                    with amp.scale_loss(lossD, optimizerG) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        amp.master_params(optimizerG), 1
+                    )
+
+                if gen_labels is not None and disc_labels is not None:
+                    return lossG, lossD
+                elif disc_labels is not None:
+                    return lossD
+                else:
+                    return memsG, memsD
+
+            ############################
+            # (0) Compute the mems basis for both graphs.
+            ###########################
+            memsG, memsD = None, None
+            for c in range(num_chunks-1):
+                memsG, memsD = forward_backward_both_models(batch, c, "input_ids", memsG, memsD)
 
             ############################
             # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
             ###########################
-            ## Train with all-real batch
-            netD.zero_grad()
-            # Format batch
-            real_inputs = {
-                "input_ids": batch["input_ids"][-1].to(device),
-                "attention_mask": batch["attention_masks"][-1].to(device),
-                "mems": memsD
-            }
-            label = torch.full((batch_size,), real_label, device=device)
-            # Forward pass real batch through D
-            logits, _ = netD(**real_inputs)
-            logits = logits.view(-1)
-            # Calculate loss on all-real batch
-            errD_real = criterion(logits, label)
-            # Calculate gradients for D in backward pass
-            with amp.scale_loss(errD_real, optimizerD) as scaled_loss:
-                scaled_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                amp.master_params(optimizerD), 1
-            )
-
-            D_x = logits.mean().item()
+            ## Train with all-real batch. In this case we want to induce the generator to "mirror" in the input_ids in
+            ## output logits. It should only mutate <mask> tokens.
+            lossG, lossD = forward_backward_both_models(batch, -1, "input_ids", memsG, memsD,
+                                                        gen_labels=batch["input_ids"][-1],
+                                                        disc_labels=real_label,
+                                                        compute_discriminator_loss=True,
+                                                        do_noise=False)
+            G_lm_losses.append(lossG.item())
+            D_losses.append(lossD.item())
 
             ## Train with all-fake batch
             # Compute the embeddings and add in noise.
-            g_embeddings = netG.get_input_embeddings().forward(batch["input_ids_masked"][-1].to(device))
+            lossD = forward_backward_both_models(batch, -1, "input_ids_masked", memsG, memsD,
+                                                 gen_labels=None, disc_labels=fake_label,
+                                                 compute_discriminator_loss=True,
+                                                 do_noise=False)
+            D_losses.append(lossD.item())
 
-            # Generate noise to apply across the <masked> tokens.
-            noise_magnitude_max = g_embeddings.mean() * .1
-            noise_magnitude_min = g_embeddings.mean() * -.1
-            target_noise = torch.randn((batch_size, max_predict_sz, mem_len), device=device) * (noise_magnitude_max - noise_magnitude_min) + noise_magnitude_min
-            text_noise = torch.zeros((batch_size, seq_sz - max_predict_sz, mem_len), device=device)
-            noise = torch.cat([text_noise, target_noise], dim=1)
-
-            g_inputs = {
-                "inputs_embeds": g_embeddings + noise,
-                "attention_mask": batch["attention_masks"][-1].to(device),
-                "mems": memsG
-            }
-            logits, mems, hidden_states = netG(**g_inputs)
-            final_target_embeddings = hidden_states[-1][:, -max_predict_sz:, :]
-            initial_text_embeddings = g_embeddings[:, :-max_predict_sz, :]
-
-            discriminator_embeddings = torch.cat([initial_text_embeddings, final_target_embeddings], dim=1)
-            fakeDInputs = {
-                "inputs_embeds": discriminator_embeddings,
-                "attention_mask": batch["attention_masks"][-1].to(device),
-                "mems": memsD
-            }
-            fakeDInputsDPass = {
-                "inputs_embeds": discriminator_embeddings.detach(),
-                "attention_mask": batch["attention_masks"][-1].to(device).detach(),
-                "mems": memsD
-            }
-
-            # Generate fake image batch with G
-            label.fill_(fake_label)
-            # Classify all fake batch with D
-            logits, _ = netD(**fakeDInputsDPass)
-            logits = logits.view(-1)
-            # Calculate D's loss on the all-fake batch
-            errD_fake = criterion(logits, label)
-            # Calculate the gradients for this batch
-            with amp.scale_loss(errD_fake, [optimizerD, optimizerG]) as scaled_loss:
-                scaled_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                amp.master_params(optimizerD), 1
-            )
-
-            D_G_z1 = logits.mean().item()
-            # Add the gradients from the all-real and all-fake batches
-            errD = errD_real + errD_fake
-            # Update D
+            # Update D. Note that G still has gradients stored in it - we'll consume those in the next step.
             optimizerD.step()
             schedulerD.step()
 
             ############################
             # (2) Update G network: maximize log(D(G(z)))
             ###########################
-            netG.zero_grad()
-            label.fill_(real_label)  # fake labels are real for generator cost
-            # Since we just updated D, perform another forward pass of all-fake batch through D
-            logits, _ = netD(**fakeDInputs)
-            logits = logits.view(-1)
-            # Calculate G's loss based on this output
-            errG = criterion(logits, label)
-            # Calculate gradients for G
-            with amp.scale_loss(errG, optimizerG) as scaled_loss:
-                scaled_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                amp.master_params(optimizerG), 1
-            )
-            D_G_z2 = logits.mean().item()
+            lossG = forward_backward_both_models(batch, -1, "input_ids_masked", memsG, memsD, gen_labels=None,
+                                                 disc_labels=real_label,
+                                                 compute_discriminator_loss=False,
+                                                 discriminator_to_generator_loss=True,
+                                                 do_noise=False)
+            G_losses.append(lossG)
+
             # Update G
             optimizerG.step()
             schedulerG.step()
 
-            # Save Losses for plotting later
-            G_losses.append(errG.item())
-            D_losses.append(errD.item())
+            # Clear out the grads. There shouldn't be any in G, but D will have some. #Just be safe.
+            netD.zero_grad()
+            netG.zero_grad()
 
             # Output training stats
             if iters != 0 and iters % its_per_log == 0:
                 mGL = sum(G_losses[-its_per_log:]) / its_per_log
+                mGL_lm = sum(G_lm_losses[-its_per_log:]) / its_per_log
                 mDL = sum(D_losses[-its_per_log:]) / its_per_log
                 if do_wandb:
                     log = {
@@ -281,18 +290,11 @@ def main():
                         'epoch': epoch,
                         'discriminatorLoss': mDL,
                         'generatorLoss': mGL,
-                        'D_x': D_x,
-                        'DG_z1': D_G_z1,
-                        'DG_z2': D_G_z2,
+                        'generatorLangModelLoss': mGL_lm,
                         'lr_D': schedulerD.get_lr()[0],
                         'lr_G': schedulerG.get_lr()[0]
                     }
                     wandb.log(log)
-                else:
-                    print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
-                          % (epoch, num_epochs, iters, len(dataloader),
-                             mDL, mGL, D_x, D_G_z1, D_G_z2))
-
 
             if iters % its_per_chkpt == 0:
                 print("Saving checkpoint at %i" % iters)
