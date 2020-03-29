@@ -389,7 +389,6 @@ if __name__ == "__main__":
     print("*** Running training ***")
     trainer = Trainer(
         model,
-        chunked_model_config,
         train_loader,
         val_loader,
         optimizer,

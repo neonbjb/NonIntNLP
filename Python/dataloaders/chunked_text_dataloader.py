@@ -68,6 +68,10 @@ class ChunkedTextDataset(Dataset):
             # Straight up append the target to the text, with the special tokens in between.
             text = torch.cat([bos_token_tensor, text, sep_token_tensor, target])
 
+            # Add masks instead of the target to get masked_text.
+            target_masks = torch.full((target_len,), self.tokenizer.mask_token_id, dtype=torch.long)
+            text_masked = torch.cat([bos_token_tensor, text, sep_token_tensor, target_masks])
+
             # Create attention_masks that'll go along with this tokenized text. Ignore the pads in the target because
             # we want the model to predict them.
             attention_mask = torch.ones(text.shape[0], dtype=torch.float)
@@ -119,6 +123,7 @@ class ChunkedTextDataset(Dataset):
                 target_mapping = torch.cat([target_mapping, tar_map_padding_tensor], dim=-1)
 
             chunked_text = torch.chunk(text, chunks=num_chunks)
+            chunked_masked_text = torch.chunk(text, chunks=num_chunks)
             chunked_attention = torch.chunk(attention_mask, chunks=num_chunks)
             chunked_perm_mask = torch.chunk(perm_mask, chunks=num_chunks, dim=-1)
             chunked_target_mapping = torch.chunk(target_mapping, chunks=num_chunks, dim=-1)
@@ -126,6 +131,7 @@ class ChunkedTextDataset(Dataset):
 
             result = {
                 "input_ids": chunked_text,
+                "input_ids_masked": chunked_masked_text,
                 "attention_masks": chunked_attention,
                 "permutation_masks": chunked_perm_mask,
                 "target_mappings": chunked_target_mapping,
