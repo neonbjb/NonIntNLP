@@ -7,7 +7,7 @@ from dataloaders.chunked_text_dataloader import ChunkedTextDataset
 # Root directory for dataset
 dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\xsum\\xsum-extracts-from-downloads\\outputs"
 output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer"
-device_name = "cuda"
+device_name = "cpu"
 
 # new stuff
 model_name = "xlnet-base-cased"
@@ -28,7 +28,7 @@ generator.to(device)
 configD = transformers.XLNetConfig.from_pretrained(model_name)
 configD.mem_len = mem_len
 configD.output_hidden_states = 1
-configD.num_labels = 1
+configD.num_labels = 2
 discriminator = transformers.XLNetForSequenceClassification.from_pretrained(os.path.join(output_dir, "test_chkpt/discriminator"), config=configD)
 discriminator.to(device)
 
@@ -64,7 +64,7 @@ with torch.no_grad():
                 }
                 if memsD is not None:
                     inputs["mems"] = memsD
-                logits, memsD, hidden = disc.forward(**inputs)
+                logits, memsD, hidden = disc.forward(**inputsD)
 
         return memsG, memsD
 
