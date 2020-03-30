@@ -1,78 +1,96 @@
 import os
-import torchvision
 import torch
-import torch.nn as nn
-import torch.utils.data
+import transformers
+import random
+from dataloaders.chunked_text_dataloader import ChunkedTextDataset
 
 # Root directory for dataset
-dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\celeba"
-# Directory to save checkpoints
+dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\xsum\\xsum-extracts-from-downloads\\outputs"
 output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer"
-# Batch size during training
-batch_size = 128
-# Spatial size of training images. All images will be resized to this
-#   size using a transformer.
-image_size = 64
-# Size of z latent vector (i.e. size of generator input)
-nz = 100
-# Size of feature maps in generator
-ngf = 64
-# Size of feature maps in discriminator
-ndf = 64
-# Number of training epochs
-num_epochs = 20
-# Learning rate for optimizers
-lr = 0.0002
-# Beta1 hyperparam for Adam optimizers
-beta1 = 0.5
-# Number of GPUs available. Use 0 for CPU mode.
-ngpu = 1
-# Whether or not to log to w&b
-do_wandb = True
+device_name = "cuda"
 
+# new stuff
+model_name = "xlnet-base-cased"
+seq_sz = 256
+max_predict_sz = 58
+mem_len = 768
+num_to_generate = 5
 # Decide which device we want to run on
-device = torch.device("cuda:0" if (torch.cuda.is_available() and ngpu > 0) else "cpu")
+device = torch.device(device_name)
 
-class Generator(nn.Module):
-    def __init__(self, ngpu, nz, ngf):
-        super(Generator, self).__init__()
-        self.ngpu = ngpu
-        self.main = nn.Sequential(
-            # input is Z, going into a convolution
-            nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(ngf * 8),
-            nn.ReLU(True),
-            # state size. (ngf*8) x 4 x 4
-            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf * 4),
-            nn.ReLU(True),
-            # state size. (ngf*4) x 8 x 8
-            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf * 2),
-            nn.ReLU(True),
-            # state size. (ngf*2) x 16 x 16
-            nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf),
-            nn.ReLU(True),
-            # state size. (ngf) x 32 x 32
-            nn.ConvTranspose2d(ngf, 3, 4, 2, 1, bias=False),
-            nn.Tanh()
-            # state size. (3) x 64 x 64
-        )
+tokenizer = transformers.XLNetTokenizer.from_pretrained(model_name)
+configG = transformers.XLNetConfig.from_pretrained(model_name)
+configG.mem_len = mem_len
+configG.output_hidden_states = 1
+generator = transformers.XLNetLMHeadModel.from_pretrained(os.path.join(output_dir, "test_chkpt/generator"), config=configG)
+generator.to(device)
 
-    def forward(self, input):
-        return self.main(input)
+configD = transformers.XLNetConfig.from_pretrained(model_name)
+configD.mem_len = mem_len
+configD.output_hidden_states = 1
+configD.num_labels = 1
+discriminator = transformers.XLNetForSequenceClassification.from_pretrained(os.path.join(output_dir, "test_chkpt/discriminator"), config=configD)
+discriminator.to(device)
 
-# Create the Discriminator
-for g in range(0, 30000, 2000):
-    netG = torch.load(os.path.join(output_dir, "generator_%i.pt" % g))
-    with torch.no_grad():
-        imglist = []
-        num_fakes = 50
-        noise = torch.randn(num_fakes, nz, 1, 1, device=device)
-        fakes = netG(noise).detach().cpu()
-        fakes_dir = os.path.join(output_dir, "fakes_%i" % g)
-        if not os.path.exists(fakes_dir):
-            os.makedirs(fakes_dir)
-        for i in range(num_fakes):
-            torchvision.utils.save_image(fakes[i], os.path.join(fakes_dir, "%i.png" % i))
+dataset = ChunkedTextDataset(
+    os.path.join(dataroot, "test.pt"),
+    tokenizer,
+    seq_sz,
+    max_predict_sz,
+    pad_left=True,
+)
+random.seed(12345)
+loader = dataset.get_dataloader(batch_sz=num_to_generate, random=True, num_workers=0)
+batch = next(loader.__iter__())
+num_chunks = len(batch["input_ids"])
+
+with torch.no_grad():
+
+    # Establish mems.
+    def computeMemsForModel(gen, disc):
+        memsG, memsD = None, None
+        for c in range(num_chunks - 1):
+            inputs = {
+                "input_ids": batch["input_ids"][c].to(device),
+                "attention_mask": batch["attention_masks"][c].to(device),
+            }
+            if memsG is not None:
+                inputs["mems"] = memsG
+            with torch.no_grad():
+                logits, memsG, hidden = gen.forward(**inputs)
+                inputsD = {
+                    "inputs_embeds": hidden[-1],
+                    "attention_mask": batch["attention_masks"][c].to(device),
+                }
+                if memsD is not None:
+                    inputs["mems"] = memsD
+                logits, memsD, hidden = disc.forward(**inputs)
+
+        return memsG, memsD
+
+
+    # Compute the mems for both the discriminator and the generator.
+    memsG, memsD = computeMemsForModel(generator, discriminator)
+
+    # Generate noise to apply across the <masked> tokens.
+    g_inputs = {
+        "input_ids": batch["input_ids_masked"][-1].to(device),
+        "attention_mask": batch["attention_masks"][-1].to(device),
+        "mems": memsG
+    }
+
+    # Feed forward and process results.
+    logits, memsG, hidden = generator(**g_inputs)
+
+    d_inputs = {
+        "inputs_embeds": hidden[-1],
+        "attention_mask": batch["attention_masks"][-1].to(device),
+        "mems": memsD
+    }
+    logitsD, memsD, hidden = discriminator(**d_inputs)
+
+    tokens = logits.softmax(dim=-1).argmax(dim=-1)
+    for b in range(num_to_generate):
+        print("Input: %s" % tokenizer.decode(batch["input_ids_masked"][-1][b]))
+        print("Output: %s" % tokenizer.decode(tokens[b]))
+    print("Discriminator losses:" + str(logitsD.to("cpu").numpy()))
