@@ -56,7 +56,7 @@ def main():
         model_name
     )
     configD.mem_len = mem_len
-    configD.num_labels = 1
+    configD.num_labels = 2
     device = torch.device("cuda:0" if (torch.cuda.is_available() and ngpu > 0) else "cpu")
 
     # Create the generator
@@ -93,8 +93,8 @@ def main():
     criterion = nn.BCEWithLogitsLoss()
 
     # Establish convention for real and fake labels during training
-    real_label = torch.ones((batch_size,), dtype=torch.float)
-    fake_label = torch.zeros((batch_size,), dtype=torch.float)
+    real_label = torch.ones((batch_size,), dtype=torch.long)
+    fake_label = torch.zeros((batch_size,), dtype=torch.long)
 
     def get_opt_and_sched(model):
         no_decay = ["bias", "LayerNorm.weight"]
