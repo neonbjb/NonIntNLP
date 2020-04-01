@@ -14,12 +14,13 @@ batch_size = 32
 # Number of training epochs
 num_epochs = 100
 train = True
+train_on_real_data = False
 
 # new stuff
 model_name = "xlnet-base-cased"
 seq_sz = 256
 max_predict_sz = 80
-start_lr = 1e-7
+start_lr = 1e-5
 device = torch.device("cuda")
 
 tokenizer = transformers.XLNetTokenizer.from_pretrained(
@@ -48,7 +49,7 @@ optimizer_grouped_parameters = [{
     "params": [p for n, p in conversionLayer.named_parameters()],
     "weight_decay": 0,
 }]
-optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=1e-6, eps=1e-8)
+optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=start_lr, eps=1e-8)
 scheduler = transformers.get_linear_schedule_with_warmup(
     optimizer,
     num_warmup_steps=0,
@@ -86,7 +87,7 @@ dataloader = dataset.get_dataloader(batch_size, random=True, num_workers=0)
 steps = 0
 for epoch in range(num_epochs):
     loss_accum = []
-    if train:
+    if train and not train_on_real_data:
         it = tqdm.tqdm(token_loader)
         for batch in it:
             batch = batch.to(device)
@@ -113,37 +114,49 @@ for epoch in range(num_epochs):
                            "epoch": epoch,
                            "step": steps,
                            "learning_rate": scheduler.get_lr()})
-        train = False  # Validate every epoch
         torch.save(conversionLayer, os.path.join(output_dir, "chkpt_%i.pt" % (epoch)))
 
-    else:
-        # Perform validation on what we've done.
-        it = tqdm.tqdm(dataloader)
-        # Short circuit validation so it doesnt get done again next step.
-        train = True
-        # For each batch in the dataloader
-        for batch in it:
-            for chunk in batch["input_ids"]:
-                chunk = chunk.to(device)
-                encoder.zero_grad()
-                decoder.zero_grad()
+    # In train_on_real_data=False mode, this loop performs validation. Otherwise it does the actual training.
+    it = tqdm.tqdm(dataloader)
+    for batch in it:
+        for chunk in batch["input_ids"]:
+            chunk = chunk.to(device)
+            encoder.zero_grad()
+            decoder.zero_grad()
 
-                encoded = encoder(chunk)
-                encoded = conversionLayer(encoded)
-                decoded = decoder(encoded)
+            encoded = encoder(chunk)
+            encoded = conversionLayer(encoded)
+            decoded = decoder(encoded)
 
-                loss = loss_fct(decoded.view(-1, decoded.size(-1)), chunk.view(-1))
+            loss = loss_fct(decoded.view(-1, decoded.size(-1)), chunk.view(-1))
+
+            if train_on_real_data:
+                loss_accum.append(loss.item())
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
                 steps += 1
 
-                for b in range(batch_size):
+                if steps % 50 == 0:
                     avg_loss = sum(loss_accum[-40:]) / 50
                     accuracy = torch.eq(chunk, decoded.softmax(-1).argmax(-1)).int().sum().float() / (batch_size * seq_sz)
 
+                    wandb.log({"loss": avg_loss,
+                               "accuracy": accuracy,
+                               "epoch": epoch,
+                               "step": steps,
+                               "learning_rate": scheduler.get_lr()})
+
+            if not train_on_real_data or steps % 500 == 0:
+                for b in range(batch_size):
+                    avg_loss = sum(loss_accum[-40:]) / 50
                     print("\nBEFOR: " + tokenizer.decode(chunk[b]))
                     print("AFTER: " + tokenizer.decode(decoded[b].softmax(-1).argmax(-1)))
-                    print("Loss: %f Accuracy: %f" % (avg_loss, accuracy))
 
-                if train:
-                    break
-            if train:
+            # Break out of these loops if we are validating.
+            if train and not train_on_real_data:
                 break
+        if train and not train_on_real_data:
+            break
+        if train_on_real_data:
+            torch.save(conversionLayer, os.path.join(output_dir, "chkpt_real_%i.pt" % (epoch)))

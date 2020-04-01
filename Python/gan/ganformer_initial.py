@@ -7,6 +7,7 @@ import transformers
 import wandb
 import tqdm
 from dataloaders.chunked_text_dataloader import ChunkedTextDataset
+from gan.encoder_decoder_converter import EncoderDecoderConverter
 from apex import amp
 
 def main():
@@ -17,6 +18,8 @@ def main():
     # Root directory for dataset
     dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\xsum\\xsum-extracts-from-downloads\\outputs"
     output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer"
+    # This provides a translation layer that lets the generator "talk" to the discriminator via embedding space.
+    translation_layer_converter = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer\\converters\\encoder_decoder.pt"
     # Batch size during training
     batch_size = 2
     # Number of training epochs
@@ -35,6 +38,10 @@ def main():
     start_lr = 2e-5
     mem_len = 768
 
+    mask_limit = 1
+    mask_offset = 5
+    target_prediction_segment = 12
+    assert(target_prediction_segment >= mask_offset + mask_limit)
 
     tokenizer = transformers.XLNetTokenizer.from_pretrained(
         model_name
@@ -44,7 +51,8 @@ def main():
         tokenizer,
         seq_sz,
         max_predict_sz,
-        pad_left=True,
+        add_pads_to_target=False,
+        mask_limit=mask_limit
     )
     dataloader = dataset.get_dataloader(batch_size, random=True, num_workers=0)
     configG = transformers.XLNetConfig.from_pretrained(
@@ -64,6 +72,9 @@ def main():
     # Handle multi-gpu if desired
     if (device.type == 'cuda') and (ngpu > 1):
         netG = nn.DataParallel(netG, list(range(ngpu)))
+
+    # Create the conversion layer between generator hidden states and discriminator embedding inputs.
+    embedding_translater = EncoderDecoderConverter(translation_layer_converter, device=device)
 
     # Create the Discriminator
     netD = transformers.XLNetForSequenceClassification.from_pretrained(model_name, config=configD).to(device)
@@ -89,14 +100,11 @@ def main():
     # Validate save_models works.
     save_models(0)
 
-    # Initialize BCELoss function
-    criterion = nn.BCEWithLogitsLoss()
-
     # Establish convention for real and fake labels during training
     real_label = torch.ones((batch_size,), dtype=torch.long)
     fake_label = torch.zeros((batch_size,), dtype=torch.long)
 
-    def get_opt_and_sched(model):
+    def get_opt_and_sched(model, extraLayer=None):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
@@ -116,6 +124,11 @@ def main():
                 "weight_decay": 0.0,
             },
         ]
+        if extraLayer is not None:
+            optimizer_grouped_parameters += [{
+                "params": [p for n, p in extraLayer.named_parameters()],
+                "weight_decay": 0,
+            }]
         optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=start_lr, eps=1e-8)
         scheduler = transformers.get_linear_schedule_with_warmup(
             optimizer,
@@ -179,16 +192,19 @@ def main():
                     }
                     # Only compute generator gradients when we are going to backprop through the generator.
                     if phase == "gen_fake":
-                        logits, memsG, hidden_states = netG(**g_inputs)
+                        logitsG, memsG, hidden_states = netG(**g_inputs)
+
+                        # Assert that final_hidden_state is the one being used to compute logits.
                         final_hidden_state = hidden_states[-1]
                     else:
                         # Do not allow gradients to flow into the generator from the discriminator when training the discriminator.
                         with torch.no_grad():
-                            logits, memsG, hidden_states = netG(**g_inputs)
+                            logitsG, memsG, hidden_states = netG(**g_inputs)
                             final_hidden_state = hidden_states[-1]
 
                 if phase == "disc_fake" or phase == "gen_fake":
-                    disc_embeddings = torch.cat([_embeddings[:, :-max_predict_sz, :], final_hidden_state[:, -max_predict_sz:, :]], dim=1).to(device)
+                    disc_input_from_gen = embedding_translater.decoder_to_encoder(final_hidden_state[:, -target_prediction_segment:, :])
+                    disc_embeddings = torch.cat([_embeddings[:, :-target_prediction_segment, :], disc_input_from_gen], dim=1).to(device)
                 else:
                     disc_embeddings = _embeddings
 
@@ -241,7 +257,7 @@ def main():
 
             ## Train with all-fake batch
             # Compute the embeddings and add in noise.
-            lossD = forward_backward_both_models(batch, -1, "input_ids_masked", memsG, memsD,
+            lossD = forward_backward_both_models(batch, -1, "input_ids", memsG, memsD,
                                                  disc_labels=fake_label, phase="disc_fake")
             D_losses.append(lossD.item())
 
@@ -253,7 +269,7 @@ def main():
             # (2) Update G network: maximize log(D(G(z)))
             ###########################
             netG.zero_grad()
-            lossG = forward_backward_both_models(batch, -1, "input_ids_masked", memsG, memsD,
+            lossG = forward_backward_both_models(batch, -1, "input_ids", memsG, memsD,
                                                  disc_labels=real_label, phase="gen_fake")
             G_losses.append(lossG)
 

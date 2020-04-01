@@ -12,7 +12,7 @@ device_name = "cpu"
 # new stuff
 model_name = "xlnet-base-cased"
 seq_sz = 256
-max_predict_sz = 58
+max_predict_sz = 80
 mem_len = 768
 num_to_generate = 5
 # Decide which device we want to run on
@@ -22,14 +22,15 @@ tokenizer = transformers.XLNetTokenizer.from_pretrained(model_name)
 configG = transformers.XLNetConfig.from_pretrained(model_name)
 configG.mem_len = mem_len
 configG.output_hidden_states = 1
-generator = transformers.XLNetLMHeadModel.from_pretrained(os.path.join(output_dir, "test_chkpt/generator"), config=configG)
+generator = transformers.XLNetLMHeadModel.from_pretrained(os.path.join(output_dir, "test_chkpt"), config=configG)
 generator.to(device)
 
 configD = transformers.XLNetConfig.from_pretrained(model_name)
 configD.mem_len = mem_len
 configD.output_hidden_states = 1
 configD.num_labels = 2
-discriminator = transformers.XLNetForSequenceClassification.from_pretrained(os.path.join(output_dir, "test_chkpt/discriminator"), config=configD)
+discriminator = transformers.XLNetForSequenceClassification.from_pretrained("xlnet-base-cased", config=configD)
+#discriminator = transformers.XLNetForSequenceClassification.from_pretrained(os.path.join(output_dir, "test_chkpt/discriminator"), config=configD)
 discriminator.to(device)
 
 dataset = ChunkedTextDataset(
@@ -37,7 +38,8 @@ dataset = ChunkedTextDataset(
     tokenizer,
     seq_sz,
     max_predict_sz,
-    pad_left=True,
+    add_pads_to_target=False,
+    mask_limit=7
 )
 random.seed(12345)
 loader = dataset.get_dataloader(batch_sz=num_to_generate, random=True, num_workers=0)
@@ -53,18 +55,15 @@ with torch.no_grad():
             inputs = {
                 "input_ids": batch["input_ids"][c].to(device),
                 "attention_mask": batch["attention_masks"][c].to(device),
+                "mems": memsG
             }
-            if memsG is not None:
-                inputs["mems"] = memsG
-            with torch.no_grad():
-                logits, memsG, hidden = gen.forward(**inputs)
-                inputsD = {
-                    "inputs_embeds": hidden[-1],
-                    "attention_mask": batch["attention_masks"][c].to(device),
-                }
-                if memsD is not None:
-                    inputs["mems"] = memsD
-                logits, memsD, hidden = disc.forward(**inputsD)
+            logits, memsG, hidden = gen.forward(**inputs)
+            inputsD = {
+                "input_ids": batch["input_ids"][c].to(device),
+                "attention_mask": batch["attention_masks"][c].to(device),
+                "mems": memsD
+            }
+            logits, memsD, hidden = disc.forward(**inputsD)
 
         return memsG, memsD
 
