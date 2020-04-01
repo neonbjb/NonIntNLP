@@ -60,8 +60,7 @@ test_set = ChunkedTextDataset(
     data_file,
     tokenizer,
     chunk_config["max_seq_len"],
-    chunk_config["predict_len"],
-    pad_left=True,
+    chunk_config["predict_len"]
 )
 
 #random.seed(12345)
@@ -86,7 +85,7 @@ for i in range(number_to_generate):
             .unsqueeze(0)
             .to(device),
             "perm_mask": chunked_data["permutation_masks"][c].unsqueeze(0).to(device),
-            "target_mapping": chunked_data["target_mappings"][c]
+            "target_mapping": chunked_data["target_mapping"]
             .unsqueeze(0)
             .to(device),
         }

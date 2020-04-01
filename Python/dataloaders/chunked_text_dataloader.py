@@ -26,21 +26,26 @@ class ChunkedTextDataset(Dataset):
     # tokenizer=huggingface-spec tokenizer used to tokenize data_file.
     # max_chunk_len=Sequence size per chunk. This minus `max_gen_len` is the space left for the actual text.
     # max_gen_len=A fixed upper cap for the sequence length of the generated text.
-    # pad_left=Whether the padding should go on the left or the right.
+    # add_pads_to_target=When true, target will be padded to max_target_len and model will predict pads. When false,
+    #                    model will predict random elements inside of the text for all max_target_len elements over true
+    #                    target_len.
+    # mask_limit=Max number of masks applied to input_ids_masked. If 0, all elements will be masked.
     def __init__(
         self,
         data_file: str,
         tokenizer: transformers.PreTrainedTokenizer,
         max_chunk_len=192,
         max_gen_len=64,
-        pad_left=False,
+        add_pads_to_target=True,
+        mask_limit=0
     ):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
         self.max_gen_len = max_gen_len
-        self.pad_left = pad_left
         self.raw_data = torch.load(data_file)
         self.raw_data.sort(key=lambda x: x["text"].shape[0])
+        self.add_pads_to_target = add_pads_to_target
+        self.mask_limit = mask_limit
 
     def process_element(self, text, target):
         # Tokens represented as 1-hot tensors which will be reused later in this function.
@@ -56,44 +61,31 @@ class ChunkedTextDataset(Dataset):
                 target = target[: self.max_gen_len]
                 # Keep the <eos> token post-trucation.
                 target[-1] = self.tokenizer.eos_token_id
+                target_len = self.max_gen_len
 
-            # The target will be the end of the sequence, so append that token onto it.
-            # Also pad target to max length. This is done to force the model to predict the actual end of the sequence.
-            pads_needed = self.max_gen_len - target_len
-            if pads_needed > 0:
-                target_padding = torch.full((pads_needed,), self.tokenizer.pad_token_id, dtype=torch.long)
-                target = torch.cat([target, target_padding])
-            target_len = self.max_gen_len
+            if self.add_pads_to_target:
+                # Also pad target to max length. This is done to force the model to predict the actual end of the sequence.
+                pads_needed = self.max_gen_len - target_len
+                if pads_needed > 0:
+                    target_padding = torch.full((pads_needed,), self.tokenizer.pad_token_id, dtype=torch.long)
+                    target = torch.cat([target, target_padding])
+                target_len = self.max_gen_len
 
             # Straight up append the target to the text, with the special tokens in between.
             text_with_target = torch.cat([bos_token_tensor, text, sep_token_tensor, target])
 
             # Add masks instead of the target to get masked_text.
-            target_masks = torch.full((target_len,), self.tokenizer.mask_token_id, dtype=torch.long)
+            mask_offset_from_end = 5  #  Force the mask to have an offset from the end of the target to give the model context.
+            if self.mask_limit >= (target_len-mask_offset_from_end) or self.mask_limit == 0:
+                target_masks = torch.full((target_len,), self.tokenizer.mask_token_id, dtype=torch.long)
+            else:
+                target_mask_portion = torch.full((self.mask_limit,), self.tokenizer.mask_token_id, dtype=torch.long)
+                target_masks = torch.cat([target[:-self.mask_limit-mask_offset_from_end], target_mask_portion, target[-mask_offset_from_end:]])
             text_masked = torch.cat([bos_token_tensor, text, sep_token_tensor, target_masks])
 
             # Create attention_masks that'll go along with this tokenized text. Ignore the pads in the target because
             # we want the model to predict them.
             attention_mask = torch.ones(text_with_target.shape[0], dtype=torch.float)
-
-            # The permutation mask is all 0s for the text_with_target; all tokens attend to each other. For the target, our goal is
-            # sequential generation, so the permutation will also be sequential. We won't let the text_with_target perform any
-            # attention on the title.
-            text_perm_mask = torch.zeros(
-                (self.max_chunk_len, text_with_target.shape[0] - target_len), dtype=torch.float
-            )
-            target_perm_mask = torch.ones(
-                (self.max_chunk_len, target_len), dtype=torch.float
-            )
-            for t_index in range(target_len):
-                target_perm_mask[-t_index][-target_len:-t_index] = 0.0
-            perm_mask = torch.cat([text_perm_mask, target_perm_mask], dim=-1)
-
-            # Build target mappings. These are identical for all chunks - the target is just an eye tensor
-            # up to target_len that is shifted to the end of the text_with_target sequence, with zeros placed everywhere.
-            target_mapping = torch.eye(target_len, dtype=torch.float)
-            target_mapping_shift = torch.zeros((target_len, text_with_target.shape[0] - target_len), dtype=torch.float)
-            target_mapping = torch.cat([target_mapping_shift, target_mapping], dim=-1)
 
             # We will chunk all inputs so that none exceed max_chunk_len, which will all be fed into the model
             # sequentially. Lets figure out what the total lengths are first.
@@ -109,34 +101,50 @@ class ChunkedTextDataset(Dataset):
                 dtype=torch.long,
             )
             att_padding_tensor = torch.zeros(padding_needed, dtype=torch.float)
-            perm_padding_tensor = torch.zeros((self.max_chunk_len, padding_needed), dtype=torch.float)
-            tar_map_padding_tensor = torch.zeros((target_len, padding_needed), dtype=torch.float)
-            if self.pad_left:
-                text_with_target = torch.cat([padding_tensor, text_with_target], dim=0)
-                text_masked = torch.cat([padding_tensor, text_masked], dim=0)
-                attention_mask = torch.cat([att_padding_tensor, attention_mask], dim=0)
-                perm_mask = torch.cat([perm_padding_tensor, perm_mask], dim=-1)
-                target_mapping = torch.cat([tar_map_padding_tensor, target_mapping], dim=-1)
-            else:
-                text_with_target = torch.cat([text_with_target, padding_tensor], dim=0)
-                text_masked = torch.cat([text_masked, padding_tensor], dim=0)
-                attention_mask = torch.cat([attention_mask, att_padding_tensor], dim=0)
-                perm_mask = torch.cat([perm_mask, perm_padding_tensor], dim=-1)
-                target_mapping = torch.cat([target_mapping, tar_map_padding_tensor], dim=-1)
+            text_with_target = torch.cat([padding_tensor, text_with_target], dim=0)
+            text_masked = torch.cat([padding_tensor, text_masked], dim=0)
+            attention_mask = torch.cat([att_padding_tensor, attention_mask], dim=0)
+
+            # The permutation mask is an eye across each chunk. The exception is the target text, which will be masked
+            # sequentially to induce the model to predict one token at a time.
+            perm_mask = torch.eye(
+                self.max_chunk_len, dtype=torch.float
+            ).repeat((num_chunks, 1))
+            # Mask targets sequentially for targets.
+            for t_index in range(1,target_len+1):
+                perm_mask[-t_index][-t_index:] = 1.0
+            # Mask all targets for all text.
+            for t_index in range(target_len+1, self.max_chunk_len+1):
+                perm_mask[-t_index][-target_len:] = 1.0
+
+            # Build target mappings and labels. These are only included for use on the last chunk.
+            target_mapping = torch.zeros((self.max_gen_len, self.max_chunk_len), dtype=torch.float)
+            labels = torch.empty((self.max_gen_len,), dtype=torch.long)
+            remaining_targets = self.max_gen_len - target_len
+            masked_text_perm = np.random.permutation(self.max_chunk_len - target_len)
+            tar_map_iter = 0
+            for i in range(remaining_targets):
+                target_mapping[tar_map_iter][masked_text_perm[i]] = 1
+                labels[tar_map_iter] = text_with_target[masked_text_perm[i] - self.max_chunk_len]
+                tar_map_iter += 1
+            for i in range(target_len):
+                if tar_map_iter >= 80:
+                    print("error incoming. %i %i %i %i" % (i, target_len, tar_map_iter, remaining_targets))
+                target_mapping[tar_map_iter][i - target_len] = 1
+                labels[tar_map_iter] = text_with_target[i - target_len]
+                tar_map_iter += 1
 
             chunked_text = torch.chunk(text_with_target, chunks=num_chunks)
             chunked_masked_text = torch.chunk(text_masked, chunks=num_chunks)
             chunked_attention = torch.chunk(attention_mask, chunks=num_chunks)
-            chunked_perm_mask = torch.chunk(perm_mask, chunks=num_chunks, dim=-1)
-            chunked_target_mapping = torch.chunk(target_mapping, chunks=num_chunks, dim=-1)
-            labels = target
+            chunked_perm_mask = torch.chunk(perm_mask, chunks=num_chunks, dim=0)
 
             result = {
                 "input_ids": chunked_text,
                 "input_ids_masked": chunked_masked_text,
                 "attention_masks": chunked_attention,
                 "permutation_masks": chunked_perm_mask,
-                "target_mappings": chunked_target_mapping,
+                "target_mapping": target_mapping,
                 "labels": labels,
             }
             return result
@@ -240,15 +248,16 @@ def helpful_print_batch(batch, tokenizer):
         chk_sz = len(batch["input_ids"])
         chk_it = 0
         target_len = batch["labels"].shape[-1]
-        for input_ids, att_mask, perm_mask, target_mapping in zip(
+        for input_ids, iim, att_mask, perm_mask in zip(
             batch["input_ids"],
+            batch["input_ids_masked"],
             batch["attention_masks"],
-            batch["permutation_masks"],
-            batch["target_mappings"],
+            batch["permutation_masks"]
         ):
             print("************CHUNK %i/%i***********" % (chk_it + 1, chk_sz))
             chk_it += 1
             print("chunk inputs=%s" % (tokenizer.decode(input_ids[b])))
+            print("masked inputs=%s" % (tokenizer.decode(iim[b])))
             print("***********************************")
             print(
                 ">>>>>>>>>>ATTENTION MASK VIEW. SHOULD SEE NO PADS (only <unk>) IN TEXT."
@@ -256,35 +265,31 @@ def helpful_print_batch(batch, tokenizer):
             masked = input_ids[b] * att_mask[b]
             print(tokenizer.decode(masked))
         print(
-            ">>>>>>>>>>TARGET VIEW. FIRST LABELS. SECOND IS PERM MASK VIEW FOR EACH TARGET IN LAST CHUNK. THIRD IS TARGET RECOMPILED FROM TARGET MAPPINGS."
+            ">>>>>>>>>>TARGET VIEW. FIRST IS PERM MASK VIEW FOR EACH TARGET IN LAST CHUNK.  SECOND LABELS. THIRD IS TARGET RECOMPILED FROM TARGET MAPPINGS."
         )
         labels_fixed = batch["labels"][b].tolist()
-        print(tokenizer.decode(labels_fixed))
 
         last_chunk_ids = batch["input_ids"][-1][b]
         last_chunk_perms = batch["permutation_masks"][-1][b]
-        last_target_mappings = batch["target_mappings"][-1][b]
+        last_target_mapping = batch["target_mapping"][b]
         recompiled_target = []
-        true_counter = -5
-        for t in range(-target_len - 5, -1): # -5 to grab the last few true input IDs to check those as well.
+        for t in range(last_target_mapping.shape[0]):
+            # Find the target_mapping inside of input_ids.
+            target_index = None
+            for i in range(chk_len):
+                if last_target_mapping[t][i] == 1.0:
+                    target_index = i
+                    break
+            if target_index is not None:
+                recompiled_target.append(last_chunk_ids[target_index])
+                target_word = tokenizer.decode([last_chunk_ids[target_index]])
+
             # perm_mask is 1 where masked, 0 where not masked. we need to invert that to make the masking easy.
-            perm_mask_list = last_chunk_perms[t].tolist()
-            perm_mask_list = [1.0 if ele == 0 else 0.0 for ele in perm_mask_list]
-            perm_mask_inverted = torch.tensor(perm_mask_list, dtype=torch.float)
+            perm_mask_inverted = (~(last_chunk_perms[target_index].bool())).long()
             masked = last_chunk_ids * perm_mask_inverted
-            print(tokenizer.decode(masked))
 
-            if true_counter >= 0:
-                # Find the target_mapping inside of input_ids.
-                target_index = None
-                for i in range(chk_len):
-                    if last_target_mappings[true_counter][i] == 1.0:
-                        target_index = i
-                        break
-                if target_index is not None:
-                    recompiled_target.append(last_chunk_ids[target_index])
-
-            true_counter += 1
+            print("[%i] %s: `%s`" % (target_index, target_word, tokenizer.decode(masked)))
+        print(tokenizer.decode(labels_fixed))
         print(tokenizer.decode(recompiled_target))
         print("***********************************")
 
@@ -314,7 +319,8 @@ def test_against_real_file(test_file, tokenizer):
         tokenizer=tokenizer,
         max_chunk_len=256,
         max_gen_len=80,
-        pad_left=True,
+        add_pads_to_target=False,
+        mask_limit=6
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
 

@@ -128,14 +128,14 @@ class Trainer:
             _chunks += _num_chunks
             _chunk_counter = 0
 
-            # Labels are not chunked.
+            # Labels and target_mapping are not chunked.
             _labels = _batch["labels"]
+            _target_mapping = _batch["target_mapping"]
 
-            for _masked_input_ids, _attention_masks, _perm_mask, _target_mapping in zip(
+            for _masked_input_ids, _attention_masks, _perm_mask in zip(
                 _batch["input_ids"],
                 _batch["attention_masks"],
-                _batch["permutation_masks"],
-                _batch["target_mappings"],
+                _batch["permutation_masks"]
             ):
                 _is_last_chunk = _chunk_counter == (_num_chunks - 1)
                 _chunk_counter += 1
@@ -145,7 +145,6 @@ class Trainer:
                     "input_ids": _masked_input_ids.to(self.device),
                     "attention_mask": _attention_masks.to(self.device),
                     "perm_mask": _perm_mask.to(self.device),
-                    "target_mapping": _target_mapping.to(self.device),
                 }
                 if _mems is not None:
                     _inputs["mems"] = _mems
@@ -153,6 +152,7 @@ class Trainer:
                 __s = time.time()
                 # Only compute gradients on the last forward() per-chunkset.
                 if _is_last_chunk:
+                    _inputs["target_mapping"] = _target_mapping.to(self.device)
                     _inputs["labels"] = _labels.to(self.device)
                     _loss, _logits, _mems = self.model.forward(**_inputs)
                 else:
@@ -310,7 +310,7 @@ if __name__ == "__main__":
         "batch_size": batch_size,
         "starting_lr": start_lr,
         "output_dir": args.output_dir,
-        "mem_len": 1024,
+        "mem_len": 768,
     }
 
     tokenizer = transformers.XLNetTokenizer.from_pretrained(
@@ -324,14 +324,14 @@ if __name__ == "__main__":
         tokenizer,
         chunked_model_config["max_seq_len"],
         chunked_model_config["predict_len"],
-        pad_left=True,
+        add_pads_to_target=False
     )
     val_set = ChunkedTextDataset(
         os.path.join(input_folder, "val.pt"),
         tokenizer,
         chunked_model_config["max_seq_len"],
         chunked_model_config["predict_len"],
-        pad_left=True,
+        add_pads_to_target=False
     )
     train_loader = train_set.get_dataloader(batch_size, num_workers=0)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
@@ -389,6 +389,7 @@ if __name__ == "__main__":
     print("*** Running training ***")
     trainer = Trainer(
         model,
+        chunked_model_config,
         train_loader,
         val_loader,
         optimizer,
