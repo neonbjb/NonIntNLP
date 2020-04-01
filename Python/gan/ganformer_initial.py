@@ -73,8 +73,8 @@ def main():
     if (device.type == 'cuda') and (ngpu > 1):
         netG = nn.DataParallel(netG, list(range(ngpu)))
 
-    # Create the conversion layer between generator hidden states and discriminator embedding inputs.
-    embedding_translater = EncoderDecoderConverter(translation_layer_converter, device=device)
+    # Create the conversion layer between generator hidden states (decoder space) and discriminator embedding inputs (encoder space).
+    embedding_translater = EncoderDecoderConverter(translation_layer_converter, forward_enc_to_dec=False, device=device)
 
     # Create the Discriminator
     netD = transformers.XLNetForSequenceClassification.from_pretrained(model_name, config=configD).to(device)
@@ -141,9 +141,11 @@ def main():
     optimizerD, schedulerD = get_opt_and_sched(netD)
     optimizerG, schedulerG = get_opt_and_sched(netG)
 
+    '''
     models, optimizers = amp.initialize([netG, netD], [optimizerG, optimizerD], opt_level="O1")
     netG, netD = models
     optimizerG, optimizerD = optimizers
+    '''
 
     # Training Loop
 
@@ -218,21 +220,15 @@ def main():
                     lossD, logits, memsD = netD(**d_inputs)
 
                     if phase == "disc_real" or phase == "disc_fake":
-                        with amp.scale_loss(lossD, optimizerD) as scaled_loss:
-                            scaled_loss.backward()
-                        torch.nn.utils.clip_grad_norm_(
-                            amp.master_params(optimizerD), 1
-                        )
+                        lossD.backward()
+                        torch.nn.utils.clip_grad_norm_(netD.parameters(), 1)
                 else:
                     with torch.no_grad():
                         logits, memsD = netD(**d_inputs)
 
                 if phase == "gen_fake":
-                    with amp.scale_loss(lossD, optimizerG) as scaled_loss:
-                        scaled_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        amp.master_params(optimizerG), 1
-                    )
+                    lossD.backward()
+                    torch.nn.utils.clip_grad_norm_(netG.parameters(), 1)
 
                 if phase == "mems":
                     return memsG, memsD
