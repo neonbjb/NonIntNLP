@@ -2,94 +2,94 @@ import os
 import torch
 import transformers
 import random
-from dataloaders.chunked_text_dataloader import ChunkedTextDataset
+from dataloaders.wiki_mask_dataset import WikiMaskDataset
 
 # Root directory for dataset
-dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\xsum\\xsum-extracts-from-downloads\\outputs"
-output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer"
-device_name = "cpu"
+dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\wiki\\processed"
+# Output directory for model checkpoints.
+output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer\\test_chkpt"
+device_name = "cuda"
 
 # new stuff
-model_name = "xlnet-base-cased"
+model_name = "albert-large-v2"
 seq_sz = 256
-max_predict_sz = 80
-mem_len = 768
-num_to_generate = 5
+#
+num_graded_tokens = 10
+num_masked_tokens = 5
+# This is basically just the batch size of this interpreter.
+batch_size = 4
+num_to_generate = 20000
+discriminator = False
 # Decide which device we want to run on
 device = torch.device(device_name)
 
-tokenizer = transformers.XLNetTokenizer.from_pretrained(model_name)
-configG = transformers.XLNetConfig.from_pretrained(model_name)
-configG.mem_len = mem_len
-configG.output_hidden_states = 1
-generator = transformers.XLNetLMHeadModel.from_pretrained(os.path.join(output_dir, "test_chkpt"), config=configG)
-generator.to(device)
-
-configD = transformers.XLNetConfig.from_pretrained(model_name)
-configD.mem_len = mem_len
-configD.output_hidden_states = 1
-configD.num_labels = 2
-discriminator = transformers.XLNetForSequenceClassification.from_pretrained("xlnet-base-cased", config=configD)
-#discriminator = transformers.XLNetForSequenceClassification.from_pretrained(os.path.join(output_dir, "test_chkpt/discriminator"), config=configD)
-discriminator.to(device)
-
-dataset = ChunkedTextDataset(
-    os.path.join(dataroot, "test.pt"),
+tokenizer = transformers.AlbertTokenizer.from_pretrained(
+    model_name
+)
+dataset = WikiMaskDataset(
+    os.path.join(dataroot, "train.pt"),
     tokenizer,
     seq_sz,
-    max_predict_sz,
-    add_pads_to_target=False,
-    mask_limit=7
+    num_elements_masked=num_masked_tokens
 )
+configG = transformers.AlbertConfig.from_pretrained(
+    model_name
+)
+configG.output_hidden_states = 1
+configD = transformers.AlbertConfig.from_pretrained(
+    model_name
+)
+configD.num_labels = 2
+
+# Create the models
+generator = transformers.AlbertForMaskedLM.from_pretrained(model_name, config=configG).to(device)
+if discriminator:
+    discriminator = transformers.AlbertForSequenceClassification.from_pretrained(model_name, config=configD).to(device)
+
 random.seed(12345)
-loader = dataset.get_dataloader(batch_sz=num_to_generate, random=True, num_workers=0)
-batch = next(loader.__iter__())
-num_chunks = len(batch["input_ids"])
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=True)
 
-with torch.no_grad():
+# Albert has a special layer between the hidden states and the embeddings. Consider transferring these
+# states across models rather than the embedding states.
+def generator_hidden_states_to_embedding(hidden_states):
+    hidden_states = generator.predictions.dense(hidden_states)
+    hidden_states = generator.predictions.activation(hidden_states)
+    hidden_states = generator.predictions.LayerNorm(hidden_states)
+    return hidden_states
 
-    # Establish mems.
-    def computeMemsForModel(gen, disc):
-        memsG, memsD = None, None
-        for c in range(num_chunks - 1):
-            inputs = {
-                "input_ids": batch["input_ids"][c].to(device),
-                "attention_mask": batch["attention_masks"][c].to(device),
-                "mems": memsG
-            }
-            logits, memsG, hidden = gen.forward(**inputs)
-            inputsD = {
-                "input_ids": batch["input_ids"][c].to(device),
-                "attention_mask": batch["attention_masks"][c].to(device),
-                "mems": memsD
-            }
-            logits, memsD, hidden = disc.forward(**inputsD)
+generated = 0
+generated_list = []
+while generated < num_to_generate:
+    with torch.no_grad():
+        batch = next(dataloader.__iter__())
+        g_inputs = {
+            "input_ids": batch["input_ids_masked"].to(device)
+        }
+        # Feed forward and process results.
+        logitsG, hidden = generator(**g_inputs)
 
-        return memsG, memsD
+        _embeddings = generator.get_input_embeddings().forward(batch["input_ids"].to(device))
+        final_hidden_state = generator_hidden_states_to_embedding(hidden[-1])
+        disc_embeddings = torch.cat([_embeddings[:, :-num_graded_tokens, :], final_hidden_state[:, -num_graded_tokens:, :]], dim=1)
+        d_inputs = {
+            "inputs_embeds": disc_embeddings
+        }
 
+        tokens = logitsG.softmax(dim=-1).argmax(dim=-1)
+        for b in range(batch_size):
+            print("Input: %s" % tokenizer.decode(batch["input_ids_masked"][b]))
+            print("Output: %s" % tokenizer.decode(tokens[b]))
 
-    # Compute the mems for both the discriminator and the generator.
-    memsG, memsD = computeMemsForModel(generator, discriminator)
+            generated_list.append({
+                "input_ids": batch["input_ids"][b].cpu().detach(),
+                "generated_ids": tokens[b].cpu().detach(),
+                "embeddings": _embeddings[b].cpu().detach(),
+                "gen_embeddings": disc_embeddings.cpu().detach()
+            })
+            generated += 1
 
-    # Generate noise to apply across the <masked> tokens.
-    g_inputs = {
-        "input_ids": batch["input_ids_masked"][-1].to(device),
-        "attention_mask": batch["attention_masks"][-1].to(device),
-        "mems": memsG
-    }
+        if discriminator:
+            logitsD = discriminator(**d_inputs)
+            print("Discriminator losses:" + str(logitsD[0].softmax(-1).to("cpu").numpy()))
 
-    # Feed forward and process results.
-    logits, memsG, hidden = generator(**g_inputs)
-
-    d_inputs = {
-        "inputs_embeds": hidden[-1],
-        "attention_mask": batch["attention_masks"][-1].to(device),
-        "mems": memsD
-    }
-    logitsD, memsD, hidden = discriminator(**d_inputs)
-
-    tokens = logits.softmax(dim=-1).argmax(dim=-1)
-    for b in range(num_to_generate):
-        print("Input: %s" % tokenizer.decode(batch["input_ids_masked"][-1][b]))
-        print("Output: %s" % tokenizer.decode(tokens[b]))
-    print("Discriminator losses:" + str(logitsD.to("cpu").numpy()))
+torch.save(generated_list, os.path.join(output_dir, "generated_data.pt"))

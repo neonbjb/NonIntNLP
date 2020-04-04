@@ -6,78 +6,62 @@ import torch.utils.data
 import transformers
 import wandb
 import tqdm
-from dataloaders.chunked_text_dataloader import ChunkedTextDataset
-from gan.encoder_decoder_converter import EncoderDecoderConverter
+from dataloaders.wiki_mask_dataset import WikiMaskDataset
 from apex import amp
 
 def main():
-    # Set random seed for reproducibility
-    random.seed(999)
-    torch.manual_seed(999)
-
     # Root directory for dataset
-    dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\xsum\\xsum-extracts-from-downloads\\outputs"
-    output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer"
-    # This provides a translation layer that lets the generator "talk" to the discriminator via embedding space.
-    translation_layer_converter = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer\\converters\\encoder_decoder.pt"
+    dataroot = "C:\\Users\\jbetk\\Documents\\data\\ml\\wiki\\processed"
+    # Output directory for model checkpoints.
+    output_dir = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer\\albert-wiki"
     # Batch size during training
-    batch_size = 2
+    batch_size = 4
     # Number of training epochs
     num_epochs = 1
     # Number of GPUs available. Use 0 for CPU mode.
     ngpu = 1
     # Whether or not to log to w&b
-    do_wandb = False
-    # Whether or not to add noise on the masks for the input embeddings fed into the generator.
-    add_noise = False
+    do_wandb = True
 
     # new stuff
-    model_name = "xlnet-base-cased"
+    model_name = "albert-large-v2"
+    disc_preload = model_name # "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer\\chkpt\\discriminator"
+    gen_preload = "C:\\Users\\jbetk\\Documents\\data\\ml\\saved_models\\ganformer\\chkpt\\generator"
     seq_sz = 256
-    max_predict_sz = 80
     start_lr = 2e-5
-    mem_len = 768
 
-    mask_limit = 1
-    mask_offset = 5
-    target_prediction_segment = 12
-    assert(target_prediction_segment >= mask_offset + mask_limit)
+    # For training
+    num_masked_tokens = 5
+    num_graded_tokens = 10
 
-    tokenizer = transformers.XLNetTokenizer.from_pretrained(
+    tokenizer = transformers.AlbertTokenizer.from_pretrained(
         model_name
     )
-    dataset = ChunkedTextDataset(
+    dataset = WikiMaskDataset(
         os.path.join(dataroot, "train.pt"),
         tokenizer,
         seq_sz,
-        max_predict_sz,
-        add_pads_to_target=False,
-        mask_limit=mask_limit
+        num_elements_masked=num_masked_tokens
     )
-    dataloader = dataset.get_dataloader(batch_size, random=True, num_workers=0)
-    configG = transformers.XLNetConfig.from_pretrained(
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=True)
+    configG = transformers.AlbertConfig.from_pretrained(
         model_name
     )
-    configG.mem_len = mem_len
     configG.output_hidden_states = 1
-    configD = transformers.XLNetConfig.from_pretrained(
+    configD = transformers.AlbertConfig.from_pretrained(
         model_name
     )
-    configD.mem_len = mem_len
     configD.num_labels = 2
     device = torch.device("cuda:0" if (torch.cuda.is_available() and ngpu > 0) else "cpu")
 
     # Create the generator
-    netG = transformers.XLNetLMHeadModel.from_pretrained(model_name, config=configG).to(device)
+    netG = transformers.AlbertForMaskedLM.from_pretrained(gen_preload, config=configG).to(device)
     # Handle multi-gpu if desired
     if (device.type == 'cuda') and (ngpu > 1):
         netG = nn.DataParallel(netG, list(range(ngpu)))
 
-    # Create the conversion layer between generator hidden states (decoder space) and discriminator embedding inputs (encoder space).
-    embedding_translater = EncoderDecoderConverter(translation_layer_converter, forward_enc_to_dec=False, device=device)
-
     # Create the Discriminator
-    netD = transformers.XLNetForSequenceClassification.from_pretrained(model_name, config=configD).to(device)
+    netD = transformers.AlbertForSequenceClassification.from_pretrained(disc_preload, config=configD).to(device)
     # Handle multi-gpu if desired
     if (device.type == 'cuda') and (ngpu > 1):
         netD = nn.DataParallel(netD, list(range(ngpu)))
@@ -104,7 +88,7 @@ def main():
     real_label = torch.ones((batch_size,), dtype=torch.long)
     fake_label = torch.zeros((batch_size,), dtype=torch.long)
 
-    def get_opt_and_sched(model, extraLayer=None):
+    def get_opt_and_sched(model):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
@@ -124,11 +108,6 @@ def main():
                 "weight_decay": 0.0,
             },
         ]
-        if extraLayer is not None:
-            optimizer_grouped_parameters += [{
-                "params": [p for n, p in extraLayer.named_parameters()],
-                "weight_decay": 0,
-            }]
         optimizer = transformers.AdamW(optimizer_grouped_parameters, lr=start_lr, eps=1e-8)
         scheduler = transformers.get_linear_schedule_with_warmup(
             optimizer,
@@ -141,17 +120,14 @@ def main():
     optimizerD, schedulerD = get_opt_and_sched(netD)
     optimizerG, schedulerG = get_opt_and_sched(netG)
 
-    '''
     models, optimizers = amp.initialize([netG, netD], [optimizerG, optimizerD], opt_level="O1")
     netG, netD = models
     optimizerG, optimizerD = optimizers
-    '''
 
-    # Init w&b logging.
     if do_wandb:
-        wandb.init(project="nonint-ganformer-torch",\
-                   name="ganformer_v3",\
-                   config={"dataset": "xsum"})
+        wandb.init(project="nonint-ganformer-torch", \
+                   name="albert-ganformer", \
+                   config={"dataset": "wiki"})
 
     # Training Loop
 
@@ -163,111 +139,94 @@ def main():
     print("Starting Training Loop...")
     # For each epoch
     for epoch in range(num_epochs):
-        its_per_chkpt = 2000
+        its_per_chkpt = 500
         its_per_log = 5
 
         it = tqdm.tqdm(dataloader)
         # For each batch in the dataloader
         for batch in it:
-            num_chunks = len(batch["input_ids"])
+
+            # Albert has a special layer between the hidden states and the embeddings. Consider transferring these
+            # states across models rather than the embedding states.
+            def generator_hidden_states_to_embedding(hidden_states):
+                hidden_states = netG.predictions.dense(hidden_states)
+                hidden_states = netG.predictions.activation(hidden_states)
+                hidden_states = netG.predictions.LayerNorm(hidden_states)
+                return hidden_states
 
             # Possible phases:
-            # "mems" - Compute mems for both generator and discriminator
             # "disc_real" - Compute discriminator loss against a real sample
             # "disc_fake" - Compute discriminator loss against the hidden state from the generator given a masked input
             # "gen_fake" - Compute generator loss through the discriminator
-            def forward_backward_both_models(batch, chunk, input_label_to_use, memsG, memsD,
-                                             disc_labels=None, phase="mems", do_noise=False):
-                _embeddings = netG.get_input_embeddings().forward(batch[input_label_to_use][chunk].to(device))
-                attention_mask = batch["attention_masks"][chunk].to(device)
-                _noise = None
+            def forward_backward_both_models(batch, phase, disc_labels=None):
+                _embeddings = netG.get_input_embeddings().forward(batch["input_ids"].to(device))
+                _embeddings_masked = netG.get_input_embeddings().forward(batch["input_ids_masked"].to(device))
 
                 # We don't need the generator in the "disc_real" phase.
                 if phase != "disc_real":
-                    if do_noise:
-                        # Generate noise to apply across the <masked> tokens.
-                        noise_magnitude_max = _embeddings.mean() * .1
-                        noise_magnitude_min = _embeddings.mean() * -.1
-                        target_noise = torch.randn((batch_size, max_predict_sz, mem_len), device=device) * (
-                                    noise_magnitude_max - noise_magnitude_min) + noise_magnitude_min
-                        text_noise = torch.zeros((batch_size, seq_sz - max_predict_sz, mem_len), device=device)
-                        _noise = torch.cat([text_noise, target_noise], dim=1, device=device)
-
                     g_inputs = {
-                        "inputs_embeds": _embeddings + _noise if _noise is not None else _embeddings,
-                        "attention_mask": attention_mask,
-                        "mems": memsG
+                        "inputs_embeds": _embeddings_masked
                     }
                     # Only compute generator gradients when we are going to backprop through the generator.
                     if phase == "gen_fake":
-                        logitsG, rMemsG, hidden_states = netG(**g_inputs)
-
-                        # Assert that final_hidden_state is the one being used to compute logits.
-                        final_hidden_state = hidden_states[-1]
+                        logitsG, hidden_states = netG(**g_inputs)
+                        final_hidden_state = generator_hidden_states_to_embedding(hidden_states[-1])
+                        computedLogits = netG.get_output_embeddings().forward(final_hidden_state)
                     else:
                         # Do not allow gradients to flow into the generator from the discriminator when training the discriminator.
                         with torch.no_grad():
-                            logitsG, rMemsG, hidden_states = netG(**g_inputs)
-                            final_hidden_state = hidden_states[-1]
+                            logitsG, hidden_states = netG(**g_inputs)
+                            final_hidden_state = generator_hidden_states_to_embedding(hidden_states[-1])
+                            computedLogits = netG.get_output_embeddings().forward(final_hidden_state)
 
                 if phase == "disc_fake" or phase == "gen_fake":
-                    disc_embeddings = embedding_translater.decoder_to_encoder(final_hidden_state)
-                    diff = disc_embeddings - _embeddings
-                    print("\nEmb: " + tokenizer.decode(batch["input_ids"][-1][0][-40:]))
-                    print("Gen: " + tokenizer.decode(logitsG.softmax(-1).argmax(-1)[0][-40:]))
+                    disc_embeddings = torch.cat([_embeddings[:, :-num_graded_tokens, :], final_hidden_state[:, -num_graded_tokens:, :]], dim=1)
+
+                    #diff = disc_embeddings - _embeddings
+                    #_embeddingsLogits = netG.get_output_embeddings().forward(_embeddings)
+                    #print("\nEmb: " + tokenizer.decode(_embeddingsLogits.softmax(-1).argmax(-1)[0]))
+                    #print("Gen: " + tokenizer.decode(computedLogits.softmax(-1).argmax(-1)[0]))
                     # Average differences across each sequence.
-                    diff = diff.sum(dim=-1) / diff.shape[-2]
-                    print("Embedding differences:")
-                    for jb in range(batch_size):
-                        print("[%i]: [%s]" % (jb, str(diff[jb].cpu())))
+                    #diff = diff.sum(dim=-1) / diff.shape[-2]
+                    #print("Embedding differences:")
+                    #for jb in range(batch_size):
+                    #    print("[%i]: [%s]" % (jb, str(diff[jb].cpu())))
                 else:
                     disc_embeddings = _embeddings
 
                 d_inputs = {
                     "inputs_embeds": disc_embeddings,
-                    "attention_mask": attention_mask,
-                    "mems": memsD,
+                    "labels": disc_labels.to(device)
                 }
-                if phase != "mems":
-                    d_inputs["labels"] = disc_labels.to(device)
-                    lossD, logits, rMemsD = netD(**d_inputs)
+                lossD, logits = netD(**d_inputs)
 
-                    if phase == "disc_real" or phase == "disc_fake":
-                        lossD.backward()
-                        torch.nn.utils.clip_grad_norm_(netD.parameters(), 1)
-                else:
-                    with torch.no_grad():
-                        logits, rMemsD = netD(**d_inputs)
+                if phase == "disc_real" or phase == "disc_fake":
+                    with amp.scale_loss(lossD, optimizerD) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        amp.master_params(optimizerD), 1
+                    )
 
                 if phase == "gen_fake":
-                    lossD.backward()
-                    torch.nn.utils.clip_grad_norm_(netG.parameters(), 1)
+                    with amp.scale_loss(lossD, optimizerG) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        amp.master_params(optimizerG), 1
+                    )
 
-                if phase == "mems":
-                    return rMemsG, rMemsD
-                else:
-                    return lossD
-
-            ############################
-            # (0) Compute the mems basis for both graphs.
-            ###########################
-            memsG, memsD = None, None
-            for c in range(num_chunks-1):
-                memsG, memsD = forward_backward_both_models(batch, c, "input_ids", memsG, memsD, phase="mems")
+                return lossD
 
             ############################
             # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
             ###########################
             ## Train with all-real batch. In this case we want to induce the generator to "mirror" in the input_ids in
             ## output logits. It should only mutate <mask> tokens.
-            lossD = forward_backward_both_models(batch, -1, "input_ids", memsG, memsD,
-                                                        disc_labels=real_label, phase="disc_real")
+            lossD = forward_backward_both_models(batch, disc_labels=real_label, phase="disc_real")
             D_losses.append(lossD.item())
 
             ## Train with all-fake batch
             # Compute the embeddings and add in noise.
-            lossD = forward_backward_both_models(batch, -1, "input_ids", memsG, memsD,
-                                                 disc_labels=fake_label, phase="disc_fake")
+            lossD = forward_backward_both_models(batch, disc_labels=fake_label, phase="disc_fake")
             D_losses.append(lossD.item())
 
             # Update D.
@@ -278,8 +237,7 @@ def main():
             # (2) Update G network: maximize log(D(G(z)))
             ###########################
             netG.zero_grad()
-            lossG = forward_backward_both_models(batch, -1, "input_ids", memsG, memsD,
-                                                 disc_labels=real_label, phase="gen_fake")
+            lossG = forward_backward_both_models(batch, disc_labels=real_label, phase="gen_fake")
             G_losses.append(lossG)
 
             # Update G

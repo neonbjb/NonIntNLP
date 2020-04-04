@@ -1,13 +1,21 @@
 import transformers
 import torch
-from torch.nn import Linear
+
 
 # Transformers encoder and decoder layers do not share the same embedding space. Fortunately, you can (generally?) train
 # a linear function that maps from one space to another. This class uses that function to allow you to convert from
 # the encoder space to the decoder space and vice versa.
-class EncoderDecoderConverter:
-    def __init__(self, pretrained_layer_path, device="cuda"):
+class EncoderDecoderConverter(torch.nn.Module):
+    def __init__(self, pretrained_layer_path, forward_enc_to_dec=True, device="cuda"):
+        super(EncoderDecoderConverter, self).__init__()
         self.conversion_layer = torch.load(pretrained_layer_path).to(device)
+        self.forward_enc_to_dec = forward_enc_to_dec
+
+    def forward(self, x):
+        if self.forward_enc_to_dec:
+            return self.encoder_to_decoder(x)
+        else:
+            return self.decoder_to_encoder(x)
 
     def encoder_to_decoder(self, tensor):
         return self.conversion_layer(tensor)
