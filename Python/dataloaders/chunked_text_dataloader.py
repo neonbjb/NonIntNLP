@@ -42,8 +42,9 @@ class ChunkedTextDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_chunk_len = max_chunk_len
         self.max_gen_len = max_gen_len
-        self.raw_data = torch.load(data_file)
-        self.raw_data.sort(key=lambda x: x["text"].shape[0])
+        self.data_file = data_file
+        self.raw_data = torch.load(self.data_file)
+        self.raw_data_sorted = False
         self.add_pads_to_target = add_pads_to_target
         self.mask_limit = mask_limit
 
@@ -149,7 +150,13 @@ class ChunkedTextDataset(Dataset):
             }
             return result
 
+    def lazy_init(self):
+        # Lazy load only when actually needed for performance.
+        if not self.raw_data_sorted:
+            self.raw_data.sort(key=lambda x: x["text"].shape[0])
+
     def num_chunks_for_index(self, i):
+        self.lazy_init()
         text = self.raw_data[i]["text"]
         with torch.no_grad():
             return math.ceil(
@@ -157,6 +164,7 @@ class ChunkedTextDataset(Dataset):
             )
 
     def __getitem__(self, index):
+        self.lazy_init()
         return self.process_element(
             self.raw_data[index]["text"], self.raw_data[index]["target"]
         )

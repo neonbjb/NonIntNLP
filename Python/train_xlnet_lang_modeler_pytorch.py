@@ -7,10 +7,7 @@ import argparse
 import json
 from dataloaders.chunked_text_dataloader import ChunkedTextDataset
 from tqdm import tqdm
-
-fp16 = True
-if fp16:
-    from apex import amp
+from apex import amp
 
 
 class Trainer:
@@ -102,7 +99,6 @@ class Trainer:
         _chunks = 0
         self.clear_timers()
 
-
         # This controls how many batches are required per optimizer step.
         _batches_required_for_desired_sz = int(
             self.desired_batch_sz / self.chunked_model_config["batch_size"]
@@ -164,7 +160,7 @@ class Trainer:
                 # Only compute backwards on the last chunk per chunkset.
                 if not _validate and _is_last_chunk:
                     __s = time.time()
-                    if fp16:
+                    if self.is_fp16:
                         with amp.scale_loss(_loss, self.optimizer) as _scaled_loss:
                             _loss.backward()
                             backward_time = time.time() - __s
@@ -333,7 +329,7 @@ if __name__ == "__main__":
         chunked_model_config["predict_len"],
         add_pads_to_target=False
     )
-    train_loader = train_set.get_dataloader(batch_size, num_workers=0)
+    train_loader = train_set.get_dataloader(batch_size, num_workers=1)
     val_loader = val_set.get_dataloader(batch_size, num_workers=0, random=False)
 
     # Initialize w&b logger
@@ -383,8 +379,7 @@ if __name__ == "__main__":
 
     # Shift model to device & enable fp16 if applicable.
     model.to(device)
-    if fp16:
-        model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
     print("*** Running training ***")
     trainer = Trainer(
@@ -395,7 +390,7 @@ if __name__ == "__main__":
         optimizer,
         scheduler,
         device,
-        fp16,
+        is_fp16=True,
         desired_batch_sz=aggregate_batch_size,
         do_wandb=do_wandb,
     )
