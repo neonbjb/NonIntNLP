@@ -1,5 +1,4 @@
 from dataloaders.remote.data_processors import DataProcessor
-from dataloaders.remote.language_modelers import LanguageModelerScheme
 
 class DataServer:
     def __init__(self):
@@ -69,7 +68,7 @@ class DataSession:
     # Unfortunately, there is not a good way to calculate this bound without iterating through the entire set, so you
     # will need to guess.
     def get_quantity_selected(self):
-        return self.server.get_quantity_for_filter(self)
+        return self.server.get_quantity_for_filter()
 
     # Locks in your data filter selections and configures how get_next() will behave.
     # task_pool_size=Maximum number of sequences to return before requiring a reset.
@@ -79,7 +78,6 @@ class DataSession:
     def start(self, task_pool_size=int, batch_size=int):
         if batch_size > task_pool_size:
             raise EnvironmentError("Batch size must be smaller than requested total size.")
-
         self.started = True
         self.counter = 0
         self.requested_size = task_pool_size
