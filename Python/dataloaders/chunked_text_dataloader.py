@@ -4,6 +4,7 @@ import transformers
 import math
 import numpy as np
 import random
+from fluentcheck import Check
 
 # This class implements a Dataset which is capable of feeding a model which expects a stream of
 # text with a generative target.
@@ -44,7 +45,7 @@ class ChunkedTextDataset(Dataset):
         self.max_gen_len = max_gen_len
         self.data_file = data_file
         self.raw_data = torch.load(self.data_file)
-        self.raw_data_sorted = False
+        self.raw_data.sort(key=lambda x: x["text"].shape[0])
         self.add_pads_to_target = add_pads_to_target
         self.mask_limit = mask_limit
 
@@ -150,13 +151,7 @@ class ChunkedTextDataset(Dataset):
             }
             return result
 
-    def lazy_init(self):
-        # Lazy load only when actually needed for performance.
-        if not self.raw_data_sorted:
-            self.raw_data.sort(key=lambda x: x["text"].shape[0])
-
     def num_chunks_for_index(self, i):
-        self.lazy_init()
         text = self.raw_data[i]["text"]
         with torch.no_grad():
             return math.ceil(
@@ -164,7 +159,6 @@ class ChunkedTextDataset(Dataset):
             )
 
     def __getitem__(self, index):
-        self.lazy_init()
         return self.process_element(
             self.raw_data[index]["text"], self.raw_data[index]["target"]
         )
@@ -327,8 +321,7 @@ def test_against_real_file(test_file, tokenizer):
         tokenizer=tokenizer,
         max_chunk_len=256,
         max_gen_len=80,
-        add_pads_to_target=False,
-        mask_limit=6
+        add_pads_to_target=True
     )
     loader = dataset.get_dataloader(batch_sz=batchsz)
 
@@ -343,8 +336,6 @@ def test_against_real_file(test_file, tokenizer):
         perform_tests(batch, chk_sz)
 
 if __name__ == "__main__":
-    from fluentcheck import Check
-
     tokenizer = transformers.XLNetTokenizer.from_pretrained("xlnet-base-cased")
 
     # Provided for testing.
